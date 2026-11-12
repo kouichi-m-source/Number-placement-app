@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# アプリのエラーログ
+zumen_annot_error.log
+
+# 図面データ・編集ファイル・書き出し画像は、誤ってコミットしないよう除外
+*.annot
+*.pdf
+*_注記.png
+
+# OS・エディタ
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
