@@ -55,10 +55,12 @@ MARGINS = ["0", "5", "10", "15", "20"]
 DPIS = ["150", "200", "300"]
 
 # 注記一覧(表)の列: (id, 見出し, 幅)
-TREE_COLS = [("pg", "頁", 34), ("num", "番号", 52), ("fs", "文字", 46), ("ln", "長さ", 46), ("wd", "太さ", 46),
-             ("ang", "角度", 48), ("arw", "矢印", 42), ("ct", "数字色", 54), ("cc", "〇色", 54),
-             ("ca", "矢印色", 58), ("com", "共通", 42)]
+TREE_COLS = [("com", "共通", 42), ("num", "番号", 64), ("pg", "頁", 34), ("fs", "文字", 46), ("ln", "長さ", 46),
+             ("wd", "太さ", 46), ("ang", "角度", 48), ("arw", "矢印", 42), ("ct", "数字色", 54), ("cc", "〇色", 54),
+             ("ca", "矢印色", 58)]
 TREE_IDS = [c[0] for c in TREE_COLS]
+TREE_FIXED = 2  # 先頭の2列(共通・番号)は横スクロールしても固定で表示する
+SORT_MARK = {0: "", 1: " ▲", 2: " ▼"}
 COMMON_CELLS = {"fs": "font_size", "ln": "length", "wd": "width", "ct": "c_text", "cc": "c_circle", "ca": "c_arrow"}
 CLAMPS = {"font_size": (4, 500), "length": (0, 10000), "width": (0.5, 200)}
 
@@ -152,11 +154,32 @@ def color_name(hx):
 
 def table_row_values(pg, a):
     placed = is_placed(a)
-    return (pg + 1, a["num"], "%g" % round(a["font_size"], 1), "%g" % round(a["length"], 1), "%g" % round(a["width"], 2),
+    return ("☑" if a["common"] else "☐", a["num"], pg + 1,
+            "%g" % round(a["font_size"], 1), "%g" % round(a["length"], 1), "%g" % round(a["width"], 2),
             ("%g" % round(a["angle"], 1)) if placed else "",
             ("☑" if a["arrow"] else "☐") if placed else "",
-            color_name(a["c_text"]), color_name(a["c_circle"]), color_name(a["c_arrow"]),
-            "☑" if a["common"] else "☐")
+            color_name(a["c_text"]), color_name(a["c_circle"]), color_name(a["c_arrow"]))
+
+
+def sort_rows(rows, mode):
+    """表示順を決める。rows=[(pg, idx, ann)]。mode 0=元の順 / 1=番号の昇順 / 2=降順。
+    数字は数値として比べ、数字以外の文字は数字の後、番号が空の行は常に最後。同じ番号は元の順を保つ。"""
+    if mode not in (1, 2):
+        return list(rows)
+    nums, txts, blanks = [], [], []
+    for r in rows:
+        n = str(r[2]["num"]).strip()
+        if n == "":
+            blanks.append(r)
+            continue
+        try:
+            nums.append((float(n), r))
+        except ValueError:
+            txts.append((n, r))
+    rev = (mode == 2)
+    nums.sort(key=lambda t: t[0], reverse=rev)
+    txts.sort(key=lambda t: t[0], reverse=rev)
+    return [r for _, r in nums] + [r for _, r in txts] + blanks
 
 
 def contrast_fg(hx):
@@ -435,9 +458,14 @@ class App:
 
         main = ttk.Frame(r)
         main.pack(fill="both", expand=True)
-        panel = ttk.Frame(main, padding=4, width=560)
+        panel = ttk.Frame(main, padding=4, width=360)
         panel.pack(side="right", fill="y")
         panel.pack_propagate(False)
+        self.panel = panel
+        sash = tk.Frame(main, width=6, cursor="sb_h_double_arrow", bg="#c8c8c8")
+        sash.pack(side="right", fill="y")
+        sash.bind("<ButtonPress-1>", lambda e: setattr(self, "_sash0", (e.x_root, self.panel.winfo_width())))
+        sash.bind("<B1-Motion>", self.on_sash_drag)
         cf = ttk.Frame(main)
         cf.pack(side="left", fill="both", expand=True)
         self.canvas = tk.Canvas(cf, bg="#6b6b6b", highlightthickness=0)
@@ -471,31 +499,46 @@ class App:
         r.bind("<Prior>", lambda e: self.change_page(-1))
         r.bind("<Next>", lambda e: self.change_page(1))
 
-        # --- 右: 注記一覧(表)
-        ttk.Label(panel, text="注記一覧", font=("", 10, "bold")).pack(anchor="w")
+        # --- 右: 注記一覧(表)。共通・番号の2列だけ別の表にして、横スクロールしても固定で見えるようにする
+        self.sort_mode = 0
+        self._ysync = False
         tf = ttk.Frame(panel)
-        tf.pack(fill="both", expand=True, pady=(2, 4))
+        tf.pack(fill="both", expand=True, pady=(0, 4))
+        tf.rowconfigure(0, weight=1)
+        tf.columnconfigure(1, weight=1)
         style = ttk.Style()
         style.configure("Treeview", rowheight=24)
         style.map("Treeview", background=[("selected", "#FF8C00")], foreground=[("selected", "#FFFFFF")])
-        self.tree = ttk.Treeview(tf, columns=TREE_IDS, show="headings", selectmode="browse")
+        fixed_ids = TREE_IDS[:TREE_FIXED]
+        scroll_ids = TREE_IDS[TREE_FIXED:]
+        self.tree_l = ttk.Treeview(tf, columns=fixed_ids, show="headings", selectmode="browse")
+        self.tree_r = ttk.Treeview(tf, columns=scroll_ids, show="headings", selectmode="browse")
+        self.col_ids = {self.tree_l: fixed_ids, self.tree_r: scroll_ids}
         for cid, head, w in TREE_COLS:
-            self.tree.heading(cid, text=head)
-            self.tree.column(cid, width=w, minwidth=w, stretch=False, anchor="center")
-        tv = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=tv.set)
-        tv.pack(side="right", fill="y")
-        self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.tag_configure("unplaced", foreground="#888888")
-        self.tree.bind("<Button-1>", self.on_tree_click)
-        self.tree.bind("<Double-1>", self.on_tree_dbl)
-        self.tree.bind("<Button-3>", self.on_tree_menu)
+            t = self.tree_l if cid in fixed_ids else self.tree_r
+            t.heading(cid, text=head)
+            t.column(cid, width=w, minwidth=w, stretch=False, anchor="center")
+        self.tree_l.heading("num", text="番号", command=self.toggle_sort)
+        self.vsb = ttk.Scrollbar(tf, orient="vertical", command=self.yview_both)
+        self.hsb = ttk.Scrollbar(tf, orient="horizontal", command=self.tree_r.xview)
+        self.tree_l.configure(yscrollcommand=lambda f, l: self.on_yscroll(self.tree_l, f, l))
+        self.tree_r.configure(yscrollcommand=lambda f, l: self.on_yscroll(self.tree_r, f, l),
+                              xscrollcommand=self.hsb.set)
+        self.tree_l.grid(row=0, column=0, sticky="ns")
+        self.tree_r.grid(row=0, column=1, sticky="nsew")
+        self.vsb.grid(row=0, column=2, sticky="ns")
+        self.hsb.grid(row=1, column=1, sticky="ew")
+        for t in (self.tree_l, self.tree_r):
+            t.tag_configure("unplaced", foreground="#888888")
+            t.bind("<Button-1>", self.on_tree_click)
+            t.bind("<Double-1>", self.on_tree_dbl)
+            t.bind("<Button-3>", self.on_tree_menu)
 
         bf = ttk.Frame(panel)
         bf.pack(fill="x")
         ttk.Button(bf, text="下に行を挿入", command=self.insert_row_below).pack(side="left")
         ttk.Button(bf, text="行を削除", command=self.delete_selected).pack(side="left", padx=6)
-        ttk.Label(panel, foreground="#555", justify="left", wraplength=540, text=(
+        ttk.Label(panel, foreground="#555", justify="left", wraplength=340, text=(
             "・行クリックで図面上の注記を選択 / 「共通」列をクリックでON・OFF\n"
             "・共通OFFの行だけ、文字・長さ・太さ・色をダブルクリックで編集\n"
             "・番号・角度はいつでもダブルクリックで編集 / 「矢印」列クリックで有無を切替\n"
@@ -1032,24 +1075,56 @@ class App:
             except tk.TclError:
                 pass
 
+    def tree_of(self, cid):
+        return self.tree_l if cid in TREE_IDS[:TREE_FIXED] else self.tree_r
+
+    def yview_both(self, *args):
+        self.tree_l.yview(*args)
+        self.tree_r.yview(*args)
+
+    def on_yscroll(self, src, first, last):
+        """どちらの表が縦にスクロールしても、もう一方と縦スクロールバーを同じ位置にそろえる"""
+        if self._ysync:
+            return
+        self._ysync = True
+        try:
+            self.vsb.set(first, last)
+            other = self.tree_r if src is self.tree_l else self.tree_l
+            other.yview_moveto(first)
+        finally:
+            self._ysync = False
+
+    def on_sash_drag(self, e):
+        x0, w0 = self._sash0
+        w = max(240, min(self.root.winfo_width() - 300, w0 - (e.x_root - x0)))
+        self.panel.configure(width=w)
+
+    def toggle_sort(self):
+        self.sort_mode = (self.sort_mode + 1) % 3
+        self.tree_l.heading("num", text="番号" + SORT_MARK[self.sort_mode])
+        self.refresh_table()
+
     def refresh_table(self):
         self.cancel_edit()
-        t = self.tree
-        t.delete(*t.get_children())
-        for pg in sorted(self.pages):
-            for i, a in enumerate(self.pages[pg]):
-                t.insert("", "end", iid="%d:%d" % (pg, i), values=table_row_values(pg, a),
-                         tags=() if is_placed(a) else ("unplaced",))
+        for t in (self.tree_l, self.tree_r):
+            t.delete(*t.get_children())
+        rows = [(pg, i, a) for pg in sorted(self.pages) for i, a in enumerate(self.pages[pg])]
+        for pg, i, a in sort_rows(rows, self.sort_mode):
+            vals = table_row_values(pg, a)
+            tags = () if is_placed(a) else ("unplaced",)
+            iid = "%d:%d" % (pg, i)
+            self.tree_l.insert("", "end", iid=iid, values=vals[:TREE_FIXED], tags=tags)
+            self.tree_r.insert("", "end", iid=iid, values=vals[TREE_FIXED:], tags=tags)
         self.sync_table_sel()
 
     def sync_table_sel(self):
-        t = self.tree
         iid = "%d:%d" % (self.cur_page, self.sel) if self.sel is not None else None
-        if iid and t.exists(iid):
-            t.selection_set(iid)
-            t.see(iid)
-        else:
-            t.selection_remove(*t.selection())
+        for t in (self.tree_l, self.tree_r):
+            if iid and t.exists(iid):
+                t.selection_set(iid)
+                t.see(iid)
+            else:
+                t.selection_remove(*t.selection())
 
     def parse_iid(self, iid):
         pg, idx = iid.split(":")
@@ -1068,13 +1143,14 @@ class App:
             self.v_status.set("未配置の行です。番号を入力して(空なら自動採番)、図面をクリックすると配置されます")
 
     def row_at(self, event):
-        if self.tree.identify_region(event.x, event.y) != "cell":
+        t = event.widget
+        if t not in self.col_ids or t.identify_region(event.x, event.y) != "cell":
             return None, None
-        iid = self.tree.identify_row(event.y)
-        col = self.tree.identify_column(event.x)
+        iid = t.identify_row(event.y)
+        col = t.identify_column(event.x)
         if not iid or not col:
             return None, None
-        return iid, TREE_IDS[int(col[1:]) - 1]
+        return iid, self.col_ids[t][int(col[1:]) - 1]
 
     def on_tree_click(self, event):
         self.cancel_edit()
@@ -1121,21 +1197,22 @@ class App:
             return "break"
         if cid in ("ct", "cc", "ca"):
             key = COMMON_CELLS[cid]
-            self.popup_palette(self.tree, a[key], lambda hx, k=key, aa=a: self.set_color_value(aa, k, hx),
+            self.popup_palette(self.tree_r, a[key], lambda hx, k=key, aa=a: self.set_color_value(aa, k, hx),
                                pos=(event.x_root, event.y_root))
             return "break"
         self.edit_cell(iid, cid)
         return "break"
 
     def edit_cell(self, iid, cid):
-        bbox = self.tree.bbox(iid, cid)
+        tree = self.tree_of(cid)
+        bbox = tree.bbox(iid, cid)
         if not bbox:
             return
         pg, idx = self.parse_iid(iid)
-        cur = self.tree.set(iid, cid)
+        cur = tree.set(iid, cid)
         self.cancel_edit()
         x, y, w, h = bbox
-        ent = ttk.Entry(self.tree, justify="center")
+        ent = ttk.Entry(tree, justify="center")
         ent.insert(0, cur)
         ent.select_range(0, "end")
         ent.place(x=x, y=y, width=w, height=h)
@@ -1219,6 +1296,9 @@ class App:
         if self.cur_ann() is None:
             messagebox.showinfo(APP_NAME, "表で行を選んでから実行してください。")
             return
+        if self.sort_mode:  # 並べ替え中は、表示順と挿入位置がずれるため、元の順に戻してから挿入する
+            self.sort_mode = 0
+            self.tree_l.heading("num", text="番号")
         self.push_undo()
         i = self.sel + 1
         self.anns().insert(i, make_ann(self.common))
