@@ -23,7 +23,7 @@ jobs:
         run: pip install -r requirements.txt pyinstaller
 
       - name: Build exe
-        run: pyinstaller --onefile --windowed --icon icon.ico --name number-placement-app --collect-all pymupdf zumen_annot.pyw
+        run: pyinstaller --onefile --windowed --icon icon.ico --name number-placement-app --collect-all pymupdf --hidden-import fitz zumen_annot.pyw
 
       - name: Upload artifact (manual runs)
         uses: actions/upload-artifact@v4
@@ -35,4 +35,20 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          name: 番号配置アプリ ${{ github.ref_name }}
+          body: |
+            図面(PDF・画像)に〇付きの番号と矢印を配置するアプリです。
+
+            ## ダウンロード
+            下の **Assets** にある **number-placement-app.exe** をクリックすると、ダウンロードが始まります。
+            Python のインストールは不要です。ダウンロードした exe をダブルクリックで起動します。
+
+            ## 初めて起動するとき
+            Windows の警告画面(「WindowsによってPCが保護されました」)が出ることがあります。
+            その場合は **「詳細情報」→「実行」** をクリックしてください。
+            この exe はコード署名をしていないため、表示されます。
+
+            ## 使い方
+            使い方は [README](https://github.com/${{ github.repository }}#readme) をご覧ください。
           files: dist/number-placement-app.exe
+          fail_on_unmatched_files: true
