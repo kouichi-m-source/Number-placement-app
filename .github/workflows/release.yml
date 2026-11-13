@@ -12,6 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +24,21 @@ jobs:
         run: pip install -r requirements.txt pyinstaller
 
       - name: Build exe
-        run: pyinstaller --onefile --windowed --icon icon.ico --name number-placement-app --collect-all pymupdf --hidden-import fitz zumen_annot.pyw
+        # PyMuPDF は DLL・pyd だけを同梱する(レイアウト解析用のモデルなど不要なファイルで約3倍に膨らむため)
+        run: pyinstaller --onefile --windowed --icon icon.ico --name number-placement-app --collect-binaries pymupdf --hidden-import fitz --hidden-import pymupdf zumen_annot.pyw
+
+      - name: Self-test the built exe (Tk / Pillow / PDF)
+        shell: pwsh
+        run: |
+          $exe = "dist\number-placement-app.exe"
+          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "::notice title=exe size::$mb MB"
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest","selftest.txt" -Wait -PassThru
+          $txt = if (Test-Path selftest.txt) { Get-Content selftest.txt -Raw } else { "(selftest.txt was not created)" }
+          Write-Host $txt
+          $one = $txt -replace "`r?`n", "%0A"
+          Write-Host "::notice title=selftest exit=$($p.ExitCode)::$one"
+          if ($p.ExitCode -ne 0) { throw "self-test failed (exit code $($p.ExitCode))" }
 
       - name: Upload artifact (manual runs)
         uses: actions/upload-artifact@v4

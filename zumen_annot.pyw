@@ -1365,7 +1365,70 @@ class App:
         self.root.mainloop()
 
 
+def run_selftest(out_path):
+    """exe化したあとの動作確認用(--selftest 出力ファイル)。
+    Tk・Pillow(描画)・PyMuPDF(PDFの描画と保存)が使えるかを調べ、結果をファイルに書く。通常の起動では使われない。"""
+    lines = []
+    state = {"ok": True}
+
+    def check(name, fn):
+        try:
+            lines.append("OK  %s: %s" % (name, fn()))
+        except Exception:
+            state["ok"] = False
+            lines.append("NG  %s\n%s" % (name, traceback.format_exc()))
+
+    def t_tk():
+        r = tk.Tk()
+        r.withdraw()
+        ver = r.tk.call("info", "patchlevel")
+        r.destroy()
+        return "Tcl/Tk %s" % ver
+
+    def t_pillow():
+        img = Image.new("RGB", (240, 140), "white")
+        a = make_ann(default_common(), 120, 70, "12", 45, True)
+        out = render_annotations(img, [a])
+        if out.getextrema() == ((255, 255), (255, 255), (255, 255)):
+            raise RuntimeError("注記が描かれていません")
+        return "注記の描画 %dx%d, フォント=%s" % (out.width, out.height, _font_path)
+
+    def t_pdf():
+        if fitz is None:
+            raise RuntimeError("PyMuPDF(fitz)を読み込めません")
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=100)
+        page.draw_rect(fitz.Rect(20, 20, 180, 80))
+        pix = page.get_pixmap(dpi=72, alpha=False)
+        Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        tmp = out_path + ".tmp.pdf"
+        doc.save(tmp)
+        doc.close()
+        d2 = fitz.open(tmp)
+        n = len(d2)
+        d2.close()
+        os.remove(tmp)
+        return "PDFの描画 %dx%d, 保存→再読込 %dページ, PyMuPDF %s" % (
+            pix.width, pix.height, n, getattr(fitz, "VersionBind", "?"))
+
+    lines.append("frozen=%s  python=%s" % (getattr(sys, "frozen", False), sys.version.split()[0]))
+    check("Tk", t_tk)
+    check("Pillow", t_pillow)
+    check("PDF", t_pdf)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return 0 if state["ok"] else 1
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _i = sys.argv.index("--selftest")
+        _p = sys.argv[_i + 1] if _i + 1 < len(sys.argv) else "selftest.txt"
+        try:
+            _code = run_selftest(_p)
+        except Exception:
+            _code = 1
+        sys.exit(_code)
     try:
         App().run()
     except Exception as _e:
