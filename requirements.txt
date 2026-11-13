@@ -1,2 +1,4 @@
 pillow
-pymupdf
+# PyMuPDF 2.x also installs large optional packages (onnxruntime, numpy, ...) for page layout analysis.
+# This app only renders pages, so stay on 1.x (keeps the exe small).
+pymupdf>=1.24,<2

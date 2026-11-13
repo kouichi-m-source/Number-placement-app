@@ -29,7 +29,7 @@ Python のインストールなしで使えます。
 
 - Python 3.9 以上(Tkinter が使える環境)
 - Pillow
-- PyMuPDF(PDFを開く場合)
+- PyMuPDF 1.x 系(PDFを開く場合。2.x は不要な大きな部品も一緒に入るため、1.x に固定しています)
 
 ```
 pip install -r requirements.txt
