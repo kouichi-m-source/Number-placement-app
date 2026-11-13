@@ -7,8 +7,8 @@
 
 Python のインストールなしで使えます。
 
-**[最新版をダウンロード(number-placement-app.exe)](https://github.com/kouichi-m-source/Namber-placement-app/releases/latest/download/number-placement-app.exe)**
-/ [リリース一覧](https://github.com/kouichi-m-source/Namber-placement-app/releases)
+**[最新版をダウンロード(number-placement-app.exe)](https://github.com/kouichi-m-source/Number-placement-app/releases/latest/download/number-placement-app.exe)**
+/ [リリース一覧](https://github.com/kouichi-m-source/Number-placement-app/releases)
 
 初めて起動するときに、Windows の警告画面(「WindowsによってPCが保護されました」)が出ることがあります。
 その場合は「詳細情報」→「実行」をクリックしてください(コード署名をしていないため表示されます)。
