@@ -15,6 +15,7 @@ import sys
 import time
 import traceback
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, colorchooser
 
 try:
@@ -55,9 +56,9 @@ MARGINS = ["0", "5", "10", "15", "20"]
 DPIS = ["150", "200", "300"]
 
 # 注記一覧(表)の列: (id, 見出し, 幅)
-TREE_COLS = [("com", "共通", 42), ("num", "番号", 64), ("pg", "頁", 34), ("fs", "文字", 46), ("ln", "長さ", 46),
-             ("wd", "太さ", 46), ("ang", "角度", 48), ("arw", "矢印", 42), ("ct", "数字色", 54), ("cc", "〇色", 54),
-             ("ca", "矢印色", 58)]
+TREE_COLS = [("com", "共通", 52), ("num", "番号", 76), ("pg", "頁", 42), ("fs", "文字(px)", 78), ("ln", "長さ(px)", 78),
+             ("wd", "太さ(px)", 78), ("arw", "矢印", 54), ("ang", "角度", 60), ("ct", "数字色", 70), ("cc", "〇色", 70),
+             ("ca", "矢印色", 76)]
 TREE_IDS = [c[0] for c in TREE_COLS]
 TREE_FIXED = 2  # 先頭の2列(共通・番号)は横スクロールしても固定で表示する
 SORT_MARK = {0: "", 1: " ▲", 2: " ▼"}
@@ -156,8 +157,8 @@ def table_row_values(pg, a):
     placed = is_placed(a)
     return ("☑" if a["common"] else "☐", a["num"], pg + 1,
             "%g" % round(a["font_size"], 1), "%g" % round(a["length"], 1), "%g" % round(a["width"], 2),
-            ("%g" % round(a["angle"], 1)) if placed else "",
             ("☑" if a["arrow"] else "☐") if placed else "",
+            ("%g" % round(a["angle"], 1)) if placed else "",
             color_name(a["c_text"]), color_name(a["c_circle"]), color_name(a["c_arrow"]))
 
 
@@ -317,6 +318,67 @@ def render_annotations(base_img, anns):
 
 
 # ------------------------------------------------------------- アプリ ---
+class FatScrollbar(tk.Canvas):
+    """太さを自由に決められるスクロールバー(Windows標準のものは太さを変えられないため自作)。
+    ttk.Scrollbar と同じく set(first,last) と command("moveto"/"scroll", ...) で連動する。"""
+
+    def __init__(self, master, orient, command, thick=20):
+        kw = {"width": thick} if orient == "vertical" else {"height": thick}
+        super().__init__(master, highlightthickness=0, bg="#e4e4e4", **kw)
+        self.orient = orient
+        self.command = command
+        self.first, self.last = 0.0, 1.0
+        self._grab = None
+        self.bind("<Configure>", lambda e: self.draw())
+        self.bind("<ButtonPress-1>", self.on_press)
+        self.bind("<B1-Motion>", self.on_drag)
+        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "_grab", None))
+
+    def length(self):
+        return max(1, self.winfo_height() if self.orient == "vertical" else self.winfo_width())
+
+    def thumb(self):
+        L = self.length()
+        a = self.first * L
+        b = max(self.last * L, a + 28)
+        if b > L:
+            a, b = max(0, L - (b - a)), L
+        return a, b
+
+    def draw(self):
+        self.delete("all")
+        a, b = self.thumb()
+        w = self.winfo_width() if self.orient == "vertical" else self.winfo_height()
+        if self.orient == "vertical":
+            self.create_rectangle(2, a + 1, w - 2, b - 1, fill="#9a9a9a", outline="")
+        else:
+            self.create_rectangle(a + 1, 2, b - 1, w - 2, fill="#9a9a9a", outline="")
+
+    def set(self, first, last):
+        self.first, self.last = float(first), float(last)
+        self.draw()
+
+    def pos(self, e):
+        return e.y if self.orient == "vertical" else e.x
+
+    def on_press(self, e):
+        p = self.pos(e)
+        a, b = self.thumb()
+        if a <= p <= b:
+            self._grab = p - a
+        elif p < a:
+            self.command("scroll", -1, "pages")
+        else:
+            self.command("scroll", 1, "pages")
+
+    def on_drag(self, e):
+        if self._grab is None:
+            return
+        span = self.last - self.first
+        f = (self.pos(e) - self._grab) / self.length()
+        self.command("moveto", max(0.0, min(1.0 - span, f)))
+
+
 class App:
     def __init__(self):
         self.root = tk.Tk()
@@ -350,6 +412,7 @@ class App:
         self.p_col = {"c_text": "#000000", "c_circle": "#000000", "c_arrow": "#000000"}
         self.v_next = tk.StringVar(value="1")
         self.place_mode = tk.BooleanVar(value=True)
+        self.place_mode.trace_add("write", lambda *a: self.remove_ghost() if not self.place_mode.get() else None)
         self.v_page = tk.StringVar(value="- / -")
         self.v_status = tk.StringVar(value="図面を開いてください(ファイル > 図面を開く)")
         self.v_paper = tk.StringVar(value=NO_PAPER)
@@ -414,7 +477,7 @@ class App:
         ttk.Button(tb, text="＋", width=3, command=lambda: self.zoom_by(1.25)).pack(side="left")
         ttk.Button(tb, text="全体", width=5, command=self.fit).pack(side="left", padx=2)
         ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Checkbutton(tb, text="クリックで新規配置", variable=self.place_mode).pack(side="left")
+        ttk.Checkbutton(tb, text="ダブルクリックで新規配置", variable=self.place_mode).pack(side="left")
 
         pp = ttk.Frame(tb)
         pp.pack(side="right")
@@ -478,6 +541,9 @@ class App:
 
         c = self.canvas
         c.bind("<ButtonPress-1>", self.on_press)
+        c.bind("<Double-Button-1>", self.on_double)
+        c.bind("<Triple-Button-1>", self.on_press)
+        c.bind("<Leave>", lambda e: self.remove_ghost())
         c.bind("<B1-Motion>", self.on_motion)
         c.bind("<ButtonRelease-1>", self.on_release)
         for b in (2, 3):
@@ -507,7 +573,9 @@ class App:
         tf.rowconfigure(0, weight=1)
         tf.columnconfigure(1, weight=1)
         style = ttk.Style()
-        style.configure("Treeview", rowheight=24)
+        self.tree_font = tkfont.nametofont("TkDefaultFont").copy()
+        self.tree_font.configure(size=11)
+        style.configure("Treeview", rowheight=30, font=self.tree_font)
         style.map("Treeview", background=[("selected", "#FF8C00")], foreground=[("selected", "#FFFFFF")])
         fixed_ids = TREE_IDS[:TREE_FIXED]
         scroll_ids = TREE_IDS[TREE_FIXED:]
@@ -519,8 +587,8 @@ class App:
             t.heading(cid, text=head)
             t.column(cid, width=w, minwidth=w, stretch=False, anchor="center")
         self.tree_l.heading("num", text="番号", command=self.toggle_sort)
-        self.vsb = ttk.Scrollbar(tf, orient="vertical", command=self.yview_both)
-        self.hsb = ttk.Scrollbar(tf, orient="horizontal", command=self.tree_r.xview)
+        self.vsb = FatScrollbar(tf, "vertical", self.yview_both)
+        self.hsb = FatScrollbar(tf, "horizontal", self.tree_r.xview)
         self.tree_l.configure(yscrollcommand=lambda f, l: self.on_yscroll(self.tree_l, f, l))
         self.tree_r.configure(yscrollcommand=lambda f, l: self.on_yscroll(self.tree_r, f, l),
                               xscrollcommand=self.hsb.set)
@@ -542,17 +610,17 @@ class App:
             "・行クリックで図面上の注記を選択 / 「共通」列をクリックでON・OFF\n"
             "・共通OFFの行だけ、文字・長さ・太さ・色をダブルクリックで編集\n"
             "・番号・角度はいつでもダブルクリックで編集 / 「矢印」列クリックで有無を切替\n"
-            "・右クリック: 下に行を挿入(未配置の行。図面をクリックすると配置)")).pack(anchor="w", pady=(6, 0))
+            "・右クリック: 下に行を挿入(未配置の行。図面をダブルクリックすると配置)")).pack(anchor="w", pady=(6, 0))
 
     def show_hints(self):
         messagebox.showinfo(APP_NAME, (
-            "・空いている所をクリック: 新しい番号を配置(クリックのままドラッグで矢印の向き)\n"
+            "・空いている所をダブルクリック: 新しい番号を配置(ダブルクリックのまま押し続けてドラッグで矢印の向き)\n"
             "・注記をドラッグ: 移動 / 矢印の先の ● をドラッグ: 向き(共通OFFなら長さも)\n"
             "・文字サイズ・矢印の長さ/太さ・色は、上の共通ステータスを入力して「更新」で、\n"
             "  共通ONの全注記(配置済みを含む)に反映されます\n"
             "・注記一覧(右の表)の「共通」列をOFFにした注記は、更新の対象から外れ、個別に編集できます\n"
             "・表で行を選んで右クリック > 下に行を挿入: 未配置の行ができます。番号を入力して\n"
-            "  行を選んだまま図面をクリックすると、その位置に配置されます(番号が空なら自動採番)\n"
+            "  行を選んだまま図面をダブルクリックすると、その位置に配置されます(番号が空なら自動採番)\n"
             "・Ctrl+ホイール: 拡大縮小 / 右・中ボタンドラッグ: 画面移動 / Delete: 削除 / Esc: 選択解除\n"
             "・用紙を選ぶと、画面に用紙の枠(実線)と余白の内側(青い破線)を表示し、PNGも用紙サイズで書き出します"))
 
@@ -958,24 +1026,47 @@ class App:
         except ValueError:
             return self.next_num
 
+    def start_hit_drag(self, ix, iy):
+        """既存の注記の上なら、選択して移動/矢印先端ドラッグを始める(Trueを返す)"""
+        hit = self.hit_test(ix, iy)
+        if not hit:
+            return False
+        idx, part = hit
+        self.remove_ghost()
+        self.sel = idx
+        a = self.anns()[idx]
+        self.drag = {"mode": "tip" if part == "tip" else "move", "idx": idx,
+                     "dx": a["x"] - ix, "dy": a["y"] - iy, "pushed": False}
+        self.redraw_annotations()
+        self.sync_table_sel()
+        return True
+
     def on_press(self, e):
+        """シングルクリック: 注記の選択・移動。何もない所では配置しない(配置はダブルクリック)"""
         self.canvas.focus_set()
         if self.base_img is None:
             return
         ix, iy = self.to_img(e)
-        hit = self.hit_test(ix, iy)
-        if hit:
-            idx, part = hit
-            self.sel = idx
-            a = self.anns()[idx]
-            self.drag = {"mode": "tip" if part == "tip" else "move", "idx": idx,
-                         "dx": a["x"] - ix, "dy": a["y"] - iy, "pushed": False}
-            self.redraw_annotations()
-            self.sync_table_sel()
+        if self.start_hit_drag(ix, iy):
             return
         cur = self.cur_ann()
         if cur is not None and not is_placed(cur):
-            # 表で選んでいる未配置の行を、クリックした位置に配置する
+            return  # 表で選んだ未配置の行は、ダブルクリックで配置するので選択を残す
+        if self.sel is not None:
+            self.select(None)
+
+    def on_double(self, e):
+        """ダブルクリック: 新規配置(ダブルクリックのまま押し続けてドラッグすると矢印の向き)"""
+        self.canvas.focus_set()
+        if self.base_img is None:
+            return
+        ix, iy = self.to_img(e)
+        if self.start_hit_drag(ix, iy):
+            return
+        self.remove_ghost()
+        cur = self.cur_ann()
+        if cur is not None and not is_placed(cur):
+            # 表で選んでいる未配置の行を、ダブルクリックした位置に配置する
             self.push_undo()
             cur["x"], cur["y"] = ix, iy
             cur["arrow"] = True
@@ -1003,6 +1094,46 @@ class App:
         self.drag = {"mode": "new", "idx": self.sel, "x0": ix, "y0": iy, "pushed": True}
         self.redraw_annotations()
         self.refresh_table()
+
+    # ---- 次に配置される〇+番号を、マウスカーソルの代わりに表示する ----
+    def remove_ghost(self):
+        try:
+            self.canvas.delete("ghost")
+            self.canvas.configure(cursor="")
+        except tk.TclError:
+            pass
+
+    def ghost_ann(self, ix, iy):
+        cur = self.cur_ann()
+        if cur is not None and not is_placed(cur):
+            num = str(cur["num"]).strip() or str(self.next_number_from_ui())
+            g = make_ann(self.common, ix, iy, num, DEFAULT_ANGLE, True)
+            for k in COMMON_KEYS:
+                g[k] = cur[k]
+            return g
+        return make_ann(self.common, ix, iy, str(self.next_number_from_ui()), DEFAULT_ANGLE, True)
+
+    def update_ghost(self, e):
+        if self.base_img is None or self.drag or not self.place_mode.get():
+            self.remove_ghost()
+            return
+        ix, iy = self.to_img(e)
+        if self.hit_test(ix, iy):  # 既存の注記の上では、通常のカーソルに戻す(選択・移動ができる)
+            self.remove_ghost()
+            return
+        a = self.ghost_ann(ix, iy)
+        c, z = self.canvas, self.zoom
+        c.delete("ghost")
+        g = geometry(a)
+        if g["shaft"]:
+            c.create_polygon([v * z for p in g["shaft"] for v in p], fill=a["c_arrow"], outline="", tags="ghost")
+            c.create_polygon([v * z for p in g["head"] for v in p], fill=a["c_arrow"], outline="", tags="ghost")
+        cx, cy, r = g["cx"] * z, g["cy"] * z, g["r"] * z
+        c.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#FFFFFF", outline=a["c_circle"],
+                      width=max(1, g["ring"] * z), tags="ghost")
+        c.create_text(cx, cy, text=str(a["num"]), fill=a["c_text"],
+                      font=("Arial", -max(1, int(round(a["font_size"] * z))), "bold"), tags="ghost")
+        c.configure(cursor="none")
 
     def aim(self, a, ix, iy, keep_len=False):
         g = geometry({**a, "arrow": False})
@@ -1046,6 +1177,7 @@ class App:
         if self.base_img is not None and not self.drag:
             ix, iy = self.to_img(e)
             self.v_status.set("x=%d  y=%d   倍率 %d%%" % (ix, iy, round(self.zoom * 100)))
+        self.update_ghost(e)
 
     def select(self, idx):
         self.sel = idx
@@ -1140,7 +1272,7 @@ class App:
         self.sync_table_sel()
         a = self.cur_ann()
         if a is not None and not is_placed(a):
-            self.v_status.set("未配置の行です。番号を入力して(空なら自動採番)、図面をクリックすると配置されます")
+            self.v_status.set("未配置の行です。番号を入力して(空なら自動採番)、図面をダブルクリックすると配置されます")
 
     def row_at(self, event):
         t = event.widget
@@ -1305,7 +1437,7 @@ class App:
         self.sel = i
         self.refresh_table()
         self.redraw_annotations()
-        self.v_status.set("行を挿入しました。番号をダブルクリックで入力し、図面をクリックすると配置されます(空なら自動採番)")
+        self.v_status.set("行を挿入しました。番号をダブルクリックで入力し、図面をダブルクリックすると配置されます(空なら自動採番)")
 
     # ---- 保存・読込 -----------------------------------------------------
     def save(self):
