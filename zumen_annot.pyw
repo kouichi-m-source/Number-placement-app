@@ -11,9 +11,11 @@ import copy
 import json
 import math
 import os
+import re
 import sys
 import time
 import traceback
+import unicodedata
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, colorchooser
@@ -56,12 +58,12 @@ MARGINS = ["0", "5", "10", "15", "20"]
 DPIS = ["150", "200", "300"]
 
 # 注記一覧(表)の列: (id, 見出し, 幅)
-TREE_COLS = [("com", "共通", 52), ("num", "番号", 76), ("pg", "頁", 42), ("fs", "文字(px)", 78), ("ln", "長さ(px)", 78),
-             ("wd", "太さ(px)", 78), ("arw", "矢印", 54), ("ang", "角度", 60), ("ct", "数字色", 70), ("cc", "〇色", 70),
-             ("ca", "矢印色", 76)]
+TREE_COLS = [("com", "共通\n ", 42), ("num", "番号\n ", 52), ("st", "状態\n ", 44), ("pg", "頁\n ", 34),
+             ("fs", "文字\n(px)", 46), ("ln", "長さ\n(px)", 46), ("wd", "太さ\n(px)", 46), ("arw", "矢印\n ", 42),
+             ("ang", "角度\n ", 48), ("ct", "数字色\n ", 54), ("cc", "〇色\n ", 54), ("ca", "矢印色\n ", 58)]
 TREE_IDS = [c[0] for c in TREE_COLS]
 TREE_FIXED = 2  # 先頭の2列(共通・番号)は横スクロールしても固定で表示する
-SORT_MARK = {0: "", 1: " ▲", 2: " ▼"}
+SORT_MARK = {0: "▲▼", 1: "▲", 2: "▼"}
 COMMON_CELLS = {"fs": "font_size", "ln": "length", "wd": "width", "ct": "c_text", "cc": "c_circle", "ca": "c_arrow"}
 CLAMPS = {"font_size": (4, 500), "length": (0, 10000), "width": (0.5, 200)}
 
@@ -153,9 +155,9 @@ def color_name(hx):
     return str(hx)
 
 
-def table_row_values(pg, a):
+def table_row_values(pg, a, status=""):
     placed = is_placed(a)
-    return ("☑" if a["common"] else "☐", a["num"], pg + 1,
+    return ("☑" if a["common"] else "☐", a["num"], status, pg + 1,
             "%g" % round(a["font_size"], 1), "%g" % round(a["length"], 1), "%g" % round(a["width"], 2),
             ("☑" if a["arrow"] else "☐") if placed else "",
             ("%g" % round(a["angle"], 1)) if placed else "",
@@ -176,7 +178,11 @@ def sort_rows(rows, mode):
         try:
             nums.append((float(n), r))
         except ValueError:
-            txts.append((n, r))
+            ints = [it[1] for it in parse_nums(n) if it[0] != "t"]  # 「3,4」「3-5」は最初の(最小の)番号で並べる
+            if ints:
+                nums.append((float(min(ints)), r))
+            else:
+                txts.append((n, r))
     rev = (mode == 2)
     nums.sort(key=lambda t: t[0], reverse=rev)
     txts.sort(key=lambda t: t[0], reverse=rev)
@@ -196,10 +202,136 @@ def ring_width(fs):
     return max(1.5, fs * 0.09)
 
 
+def text_width_em(s):
+    """番号の文字の横幅の目安(文字サイズに対する倍率)。半角の記号は狭く、全角は広く数える。"""
+    w = 0.0
+    for ch in str(s):
+        if ch in ",.-:;' ":
+            w += 0.30
+        elif ch.isascii():
+            w += 0.56
+        else:
+            w += 1.0
+    return w
+
+
 def circle_radius(a):
+    """〇の半径。1桁は最小サイズ、2桁以上は文字の幅に合わせて少しずつ大きくする。"""
     fs = a["font_size"]
-    n = max(1, len(str(a["num"])))
-    return max(fs * 0.7, fs * 0.32 * n + fs * 0.35)
+    w = max(0.56, text_width_em(a["num"]))
+    return max(fs * 0.7, fs * (0.54 * w + 0.20))
+
+
+# ------------------------------------------------------- 番号の解析・整理 ---
+_NUM_SEP = re.compile(r"[,、，・\s]+")
+_NUM_RANGE = re.compile(r"^(\d+)[-~〜ー](\d+)$")
+
+
+def parse_nums(s):
+    """番号欄の文字を分解する。「3,4」「3-5」のように書くと、1つの〇に複数の番号を入れられる。
+    戻り値: [("n", 数, 数) 単独 / ("r", 始, 終) 範囲 / ("t", 文字) 数字以外]"""
+    s = unicodedata.normalize("NFKC", str(s)).strip()
+    out = []
+    for tok in _NUM_SEP.split(s):
+        if not tok:
+            continue
+        m = _NUM_RANGE.match(tok)
+        if m and int(m.group(1)) <= int(m.group(2)) <= int(m.group(1)) + 1000:
+            out.append(("r", int(m.group(1)), int(m.group(2))))
+        elif tok.isascii() and tok.isdigit():
+            out.append(("n", int(tok), int(tok)))
+        else:
+            out.append(("t", tok))
+    return out
+
+
+def num_keys(s):
+    """その注記が持つ番号の集合(範囲は展開)。重複・欠番の判定に使う。"""
+    keys = set()
+    for it in parse_nums(s):
+        if it[0] == "t":
+            keys.add(it[1])
+        else:
+            keys.update(str(i) for i in range(it[1], it[2] + 1))
+    return keys
+
+
+def analyze_numbers(pages):
+    """全ページの配置済み注記から、配置数・未配置数・重複する番号・欠番を調べる。
+    欠番 = 1 から「配置済みの最大の番号」までの間で、どの注記にもない番号。"""
+    count, rows = {}, {}
+    placed = unplaced = 0
+    for pg in pages:
+        for i, a in enumerate(pages[pg]):
+            if not is_placed(a):
+                unplaced += 1
+                continue
+            placed += 1
+            ks = num_keys(a["num"])
+            rows[(pg, i)] = ks
+            for k in ks:
+                count[k] = count.get(k, 0) + 1
+    dup_keys = {k for k, c in count.items() if c >= 2}
+    dup_rows = {rid for rid, ks in rows.items() if ks & dup_keys}
+    ints = [int(k) for k in count if k.isdigit()]
+    top = max(ints) if ints else 0
+    missing = [n for n in range(1, top + 1) if str(n) not in count] if top <= 100000 else []
+    dups = sorted((k for k in dup_keys if k.isdigit()), key=int) + sorted(k for k in dup_keys if not k.isdigit())
+    return {"placed": placed, "unplaced": unplaced, "dups": dups, "dup_rows": dup_rows, "missing": missing}
+
+
+def _fmt_list(items, limit=8):
+    if not items:
+        return "なし"
+    txt = "・".join(str(x) for x in items[:limit])
+    return txt + (" 他%d" % (len(items) - limit) if len(items) > limit else "")
+
+
+def summary_text(info):
+    return "配置 %d / 未配置 %d / 重複 %s / 欠番 %s" % (
+        info["placed"], info["unplaced"], _fmt_list(info["dups"]), _fmt_list(info["missing"]))
+
+
+def remap_text(s, mp):
+    parts = []
+    for it in parse_nums(s):
+        if it[0] == "t":
+            parts.append(it[1])
+        elif it[0] == "n" or it[1] == it[2]:
+            parts.append(str(mp[it[1]]))
+        else:
+            parts.append("%d-%d" % (mp[it[1]], mp[it[2]]))
+    return ",".join(parts)
+
+
+def compute_renumber(pages, mode, order):
+    """番号の振り直しの変更内容 [(ページ, 番号, 新しい文字)] を返す。
+    mode "compact": 欠番を詰める(重複・複数番号はそのまま、番号の順序も保つ)
+    mode "seq": order(表の並び)の配置済み注記に、1から順に付け直す(重複もなくなる)"""
+    changes = []
+    if mode == "seq":
+        k = 0
+        for pg, i in order:
+            a = pages[pg][i]
+            if is_placed(a):
+                k += 1
+                if str(a["num"]) != str(k):
+                    changes.append((pg, i, str(k)))
+        return changes
+    keys = set()
+    for pg in pages:
+        for a in pages[pg]:
+            keys |= {int(k) for k in num_keys(a["num"]) if k.isdigit()}
+    mp = {n: j + 1 for j, n in enumerate(sorted(keys))}
+    for pg in sorted(pages):
+        for i, a in enumerate(pages[pg]):
+            items = parse_nums(a["num"])
+            if not any(it[0] != "t" for it in items):
+                continue
+            new = remap_text(a["num"], mp)
+            if new != str(a["num"]):
+                changes.append((pg, i, new))
+    return changes
 
 
 def geometry(a):
@@ -568,6 +700,10 @@ class App:
         # --- 右: 注記一覧(表)。共通・番号の2列だけ別の表にして、横スクロールしても固定で見えるようにする
         self.sort_mode = 0
         self._ysync = False
+        self._row_tags = {}
+        self._sel_iid = None
+        self.v_summary = tk.StringVar(value="")
+        ttk.Label(panel, textvariable=self.v_summary, foreground="#333", wraplength=340, justify="left").pack(anchor="w", pady=(0, 3))
         tf = ttk.Frame(panel)
         tf.pack(fill="both", expand=True, pady=(0, 4))
         tf.rowconfigure(0, weight=1)
@@ -575,7 +711,8 @@ class App:
         style = ttk.Style()
         self.tree_font = tkfont.nametofont("TkDefaultFont").copy()
         self.tree_font.configure(size=11)
-        style.configure("Treeview", rowheight=30, font=self.tree_font)
+        style.configure("Treeview", rowheight=24, font=self.tree_font)
+        style.configure("Treeview.Heading", padding=(2, 3))
         style.map("Treeview", background=[("selected", "#FF8C00")], foreground=[("selected", "#FFFFFF")])
         fixed_ids = TREE_IDS[:TREE_FIXED]
         scroll_ids = TREE_IDS[TREE_FIXED:]
@@ -586,7 +723,9 @@ class App:
             t = self.tree_l if cid in fixed_ids else self.tree_r
             t.heading(cid, text=head)
             t.column(cid, width=w, minwidth=w, stretch=False, anchor="center")
-        self.tree_l.heading("num", text="番号", command=self.toggle_sort)
+        self.btn_sort = tk.Button(self.tree_l, text="番号\n▲▼", relief="raised", bd=2, takefocus=0,
+                                  command=self.toggle_sort)  # 押せることが分かるよう、見出しに重ねた立体のボタン
+        self.tree_l.bind("<Configure>", lambda e: self.root.after_idle(self.place_sort_button))
         self.vsb = FatScrollbar(tf, "vertical", self.yview_both)
         self.hsb = FatScrollbar(tf, "horizontal", self.tree_r.xview)
         self.tree_l.configure(yscrollcommand=lambda f, l: self.on_yscroll(self.tree_l, f, l))
@@ -598,6 +737,8 @@ class App:
         self.hsb.grid(row=1, column=1, sticky="ew")
         for t in (self.tree_l, self.tree_r):
             t.tag_configure("unplaced", foreground="#888888")
+            t.tag_configure("dup", background="#FFF0B3")
+            t.tag_configure("selrow", background="#FF8C00", foreground="#FFFFFF")
             t.bind("<Button-1>", self.on_tree_click)
             t.bind("<Double-1>", self.on_tree_dbl)
             t.bind("<Button-3>", self.on_tree_menu)
@@ -606,6 +747,7 @@ class App:
         bf.pack(fill="x")
         ttk.Button(bf, text="下に行を挿入", command=self.insert_row_below).pack(side="left")
         ttk.Button(bf, text="行を削除", command=self.delete_selected).pack(side="left", padx=6)
+        ttk.Button(bf, text="番号を振り直す", command=self.renumber).pack(side="left")
         ttk.Label(panel, foreground="#555", justify="left", wraplength=340, text=(
             "・行クリックで図面上の注記を選択 / 「共通」列をクリックでON・OFF\n"
             "・共通OFFの行だけ、文字・長さ・太さ・色をダブルクリックで編集\n"
@@ -619,6 +761,8 @@ class App:
             "・文字サイズ・矢印の長さ/太さ・色は、上の共通ステータスを入力して「更新」で、\n"
             "  共通ONの全注記(配置済みを含む)に反映されます\n"
             "・注記一覧(右の表)の「共通」列をOFFにした注記は、更新の対象から外れ、個別に編集できます\n"
+            "・番号欄に「3,4」「3-5」と書くと、1つの〇に複数の番号を入れられます(重複・欠番の判定は番号ごと)\n"
+            "・表の上の「配置/未配置/重複/欠番」は集計です。欠番は、1から最大の番号までの抜けです\n"
             "・表で行を選んで右クリック > 下に行を挿入: 未配置の行ができます。番号を入力して\n"
             "  行を選んだまま図面をダブルクリックすると、その位置に配置されます(番号が空なら自動採番)\n"
             "・Ctrl+ホイール: 拡大縮小 / 右・中ボタンドラッグ: 画面移動 / Delete: 削除 / Esc: 選択解除\n"
@@ -1233,30 +1377,60 @@ class App:
 
     def toggle_sort(self):
         self.sort_mode = (self.sort_mode + 1) % 3
-        self.tree_l.heading("num", text="番号" + SORT_MARK[self.sort_mode])
+        self.btn_sort.configure(text="番号\n" + SORT_MARK[self.sort_mode])
         self.refresh_table()
+
+    def place_sort_button(self):
+        """「番号」の見出しの上に、並べ替えボタンを重ねる(見出しと同じ高さ)"""
+        t = self.tree_l
+        t.update_idletasks()
+        h = 0
+        for y in range(0, 100):
+            if t.identify_region(5, y) == "heading":
+                h = y + 1
+            elif h:
+                break
+        if h < 20:
+            h = 40
+        self.btn_sort.place(x=int(t.column("com", "width")), y=0, width=int(t.column("num", "width")), height=h)
 
     def refresh_table(self):
         self.cancel_edit()
+        info = analyze_numbers(self.pages)
+        self.v_summary.set(summary_text(info))
         for t in (self.tree_l, self.tree_r):
             t.delete(*t.get_children())
+        self._row_tags = {}
+        self._sel_iid = None
         rows = [(pg, i, a) for pg in sorted(self.pages) for i, a in enumerate(self.pages[pg])]
         for pg, i, a in sort_rows(rows, self.sort_mode):
-            vals = table_row_values(pg, a)
-            tags = () if is_placed(a) else ("unplaced",)
+            if not is_placed(a):
+                status, tags = "未配置", ("unplaced",)
+            elif (pg, i) in info["dup_rows"]:
+                status, tags = "重複", ("dup",)
+            else:
+                status, tags = "", ()
+            vals = table_row_values(pg, a, status)
             iid = "%d:%d" % (pg, i)
+            self._row_tags[iid] = tags
             self.tree_l.insert("", "end", iid=iid, values=vals[:TREE_FIXED], tags=tags)
             self.tree_r.insert("", "end", iid=iid, values=vals[TREE_FIXED:], tags=tags)
         self.sync_table_sel()
 
     def sync_table_sel(self):
+        """図面で選んだ注記に対応する表の行を、オレンジで目立たせる"""
         iid = "%d:%d" % (self.cur_page, self.sel) if self.sel is not None else None
+        old = self._sel_iid
         for t in (self.tree_l, self.tree_r):
+            if old and old != iid and t.exists(old):
+                t.item(old, tags=self._row_tags.get(old, ()))
             if iid and t.exists(iid):
+                t.item(iid, tags=("selrow",))
                 t.selection_set(iid)
                 t.see(iid)
             else:
                 t.selection_remove(*t.selection())
+        self._sel_iid = iid if (iid and self.tree_l.exists(iid)) else None
 
     def parse_iid(self, iid):
         pg, idx = iid.split(":")
@@ -1320,7 +1494,7 @@ class App:
         pg, idx = self.parse_iid(iid)
         self.select_row(pg, idx)
         a = self.cur_ann()
-        if a is None or cid in ("com", "arw", "pg"):
+        if a is None or cid in ("com", "arw", "pg", "st"):
             return "break"
         if cid in COMMON_CELLS and a["common"]:
             self.v_status.set("共通がONのため編集できません。「共通」列をクリックしてOFFにしてください")
@@ -1430,7 +1604,7 @@ class App:
             return
         if self.sort_mode:  # 並べ替え中は、表示順と挿入位置がずれるため、元の順に戻してから挿入する
             self.sort_mode = 0
-            self.tree_l.heading("num", text="番号")
+            self.btn_sort.configure(text="番号\n" + SORT_MARK[0])
         self.push_undo()
         i = self.sel + 1
         self.anns().insert(i, make_ann(self.common))
@@ -1438,6 +1612,49 @@ class App:
         self.refresh_table()
         self.redraw_annotations()
         self.v_status.set("行を挿入しました。番号をダブルクリックで入力し、図面をダブルクリックすると配置されます(空なら自動採番)")
+
+    def renumber(self):
+        if self.base_img is None:
+            messagebox.showinfo(APP_NAME, "先に図面を開いてください。")
+            return
+        top = tk.Toplevel(self.root)
+        top.title("番号の振り直し")
+        top.transient(self.root)
+        top.resizable(False, False)
+        top.geometry("+%d+%d" % (self.root.winfo_rootx() + 260, self.root.winfo_rooty() + 160))
+        ttk.Label(top, justify="left", padding=10, text=(
+            "番号の振り直し方を選んでください(「元に戻す」で戻せます)。\n\n"
+            "・欠番を詰める: 番号の順序・重複・複数番号はそのままで、抜けた番号だけ詰めます\n"
+            "・表の並び順に連番: いまの表の並び順に、配置済みの注記へ1から付け直します(重複はなくなります)")).pack()
+
+        def run(mode):
+            top.destroy()
+            self.do_renumber(mode)
+
+        ttk.Button(top, text="欠番を詰める", command=lambda: run("compact")).pack(fill="x", padx=10, pady=3)
+        ttk.Button(top, text="表の並び順に1から連番", command=lambda: run("seq")).pack(fill="x", padx=10, pady=3)
+        ttk.Button(top, text="キャンセル", command=top.destroy).pack(fill="x", padx=10, pady=(3, 10))
+
+    def do_renumber(self, mode):
+        rows = [(pg, i, a) for pg in sorted(self.pages) for i, a in enumerate(self.pages[pg])]
+        order = [(pg, i) for pg, i, a in sort_rows(rows, self.sort_mode)]
+        changes = compute_renumber(self.pages, mode, order)
+        if not changes:
+            self.v_status.set("振り直しの必要がありませんでした(変更なし)")
+            return
+        self.push_undo()
+        for pg, i, text in changes:
+            self.pages[pg][i]["num"] = text
+        top = 0
+        for lst in self.pages.values():
+            for a in lst:
+                ints = [int(k) for k in num_keys(a["num"]) if k.isdigit()]
+                top = max([top] + ints)
+        self.next_num = top + 1
+        self.v_next.set(str(self.next_num))
+        self.refresh_table()
+        self.redraw_annotations()
+        self.v_status.set("番号を振り直しました(%d件)。次の番号は %d です" % (len(changes), self.next_num))
 
     # ---- 保存・読込 -----------------------------------------------------
     def save(self):
