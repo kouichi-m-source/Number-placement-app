@@ -215,11 +215,20 @@ def text_width_em(s):
     return w
 
 
-def circle_radius(a):
-    """〇の半径。1桁は最小サイズ、2桁以上は文字の幅に合わせて少しずつ大きくする。"""
+def circle_radii(a):
+    """〇(楕円)の横・縦の半径 (rx, ry)。1〜2桁は円。それより長い番号(3桁以上や「3,4」のような複数番号)は、
+    高さは2桁のままで、横にだけ伸びる楕円になる。"""
     fs = a["font_size"]
     w = max(0.56, text_width_em(a["num"]))
-    return max(fs * 0.7, fs * (0.54 * w + 0.20))
+    rx = fs * max(0.7, 0.5 * w + 0.25)
+    if rx > fs * 0.81:  # 横に長い番号は楕円。楕円の縁に文字の角が当たらないよう、余裕を持たせる
+        rx = fs * (0.58 * w + 0.20)
+    return rx, min(rx, fs * 0.81)
+
+
+def ellipse_dist(rx, ry, dx, dy):
+    """中心から単位ベクトル(dx,dy)の向きに進んだとき、楕円(rx,ry)の縁までの距離"""
+    return 1.0 / math.sqrt((dx / rx) ** 2 + (dy / ry) ** 2)
 
 
 # ------------------------------------------------------- 番号の解析・整理 ---
@@ -337,17 +346,18 @@ def compute_renumber(pages, mode, order):
 def geometry(a):
     """配置済みの注記1件の図形を画像座標で返す。"""
     cx, cy = a["x"], a["y"]
-    r = circle_radius(a)
+    rx, ry = circle_radii(a)
     ring = ring_width(a["font_size"])
-    g = {"cx": cx, "cy": cy, "r": r, "ring": ring,
+    g = {"cx": cx, "cy": cy, "rx": rx, "ry": ry, "ring": ring,
          "shaft": None, "head": None, "tip": None, "seg": None}
     if a.get("arrow") and a["length"] > 0:
         th = math.radians(a["angle"])
         dx, dy = math.cos(th), -math.sin(th)  # 角度0=右, 90=上(反時計回り)
         px, py = -dy, dx
         w = max(0.5, a["width"])
-        start_r = r + ring / 2
-        sx, sy = cx + dx * r, cy + dy * r
+        start_r = ellipse_dist(rx + ring / 2, ry + ring / 2, dx, dy)
+        r_in = ellipse_dist(rx, ry, dx, dy)
+        sx, sy = cx + dx * r_in, cy + dy * r_in
         tx, ty = cx + dx * (start_r + a["length"]), cy + dy * (start_r + a["length"])
         hl = max(1.0, min(w * 3.5 + 2, a["length"]))
         hw = w * 1.7 + 1
@@ -410,8 +420,8 @@ def get_font(size):
 def paste_annotation(base, a):
     """base(RGBA)に配置済みの注記1件を合成する。注記ごとの小タイルを高解像度で描いて縮小する。色は注記自身の値を使う。"""
     g = geometry(a)
-    xs = [g["cx"] - g["r"] - g["ring"], g["cx"] + g["r"] + g["ring"]]
-    ys = [g["cy"] - g["r"] - g["ring"], g["cy"] + g["r"] + g["ring"]]
+    xs = [g["cx"] - g["rx"] - g["ring"], g["cx"] + g["rx"] + g["ring"]]
+    ys = [g["cy"] - g["ry"] - g["ring"], g["cy"] + g["ry"] + g["ring"]]
     for key in ("shaft", "head"):
         if g[key]:
             xs += [p[0] for p in g[key]]
@@ -432,9 +442,9 @@ def paste_annotation(base, a):
     if g["shaft"]:
         d.polygon([T(p) for p in g["shaft"]], fill=a["c_arrow"])
         d.polygon([T(p) for p in g["head"]], fill=a["c_arrow"])
-    R = g["r"] + g["ring"] / 2
+    Rx, Ry = g["rx"] + g["ring"] / 2, g["ry"] + g["ring"] / 2
     c = T((g["cx"], g["cy"]))
-    d.ellipse([c[0] - R * SS, c[1] - R * SS, c[0] + R * SS, c[1] + R * SS],
+    d.ellipse([c[0] - Rx * SS, c[1] - Ry * SS, c[0] + Rx * SS, c[1] + Ry * SS],
               fill="#FFFFFF", outline=a["c_circle"], width=max(1, int(round(g["ring"] * SS))))
     d.text(c, str(a["num"]), font=get_font(a["font_size"] * SS), fill=a["c_text"], anchor="mm")
     tile = tile.resize((x1 - x0, y1 - y0), Image.LANCZOS)
@@ -712,7 +722,11 @@ class App:
         self.tree_font = tkfont.nametofont("TkDefaultFont").copy()
         self.tree_font.configure(size=11)
         style.configure("Treeview", rowheight=24, font=self.tree_font)
-        style.configure("Treeview.Heading", padding=(2, 3))
+        try:  # 見出しは2段なので、文字が切れないよう、見出し行の縦幅を文字2行ぶんにする
+            ls = tkfont.nametofont("TkHeadingFont").metrics("linespace")
+        except tk.TclError:
+            ls = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+        style.configure("Treeview.Heading", padding=(2, ls // 2 + 4))
         style.map("Treeview", background=[("selected", "#FF8C00")], foreground=[("selected", "#FFFFFF")])
         fixed_ids = TREE_IDS[:TREE_FIXED]
         scroll_ids = TREE_IDS[TREE_FIXED:]
@@ -1130,14 +1144,14 @@ class App:
             if g["shaft"]:
                 c.create_polygon([v * z for p in g["shaft"] for v in p], fill=a["c_arrow"], outline="", tags="ann")
                 c.create_polygon([v * z for p in g["head"] for v in p], fill=a["c_arrow"], outline="", tags="ann")
-            cx, cy, r = g["cx"] * z, g["cy"] * z, g["r"] * z
-            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#FFFFFF", outline=a["c_circle"],
+            cx, cy, rx, ry = g["cx"] * z, g["cy"] * z, g["rx"] * z, g["ry"] * z
+            c.create_oval(cx - rx, cy - ry, cx + rx, cy + ry, fill="#FFFFFF", outline=a["c_circle"],
                           width=max(1, g["ring"] * z), tags="ann")
             c.create_text(cx, cy, text=str(a["num"]), fill=a["c_text"],
                           font=("Arial", -max(1, int(round(a["font_size"] * z))), "bold"), tags="ann")
             if i == self.sel:
-                m = r + g["ring"] * z / 2 + 4
-                c.create_oval(cx - m, cy - m, cx + m, cy + m, outline="#FF8C00", dash=(4, 3), width=2, tags="ann")
+                m = g["ring"] * z / 2 + 4
+                c.create_oval(cx - rx - m, cy - ry - m, cx + rx + m, cy + ry + m, outline="#FF8C00", dash=(4, 3), width=2, tags="ann")
                 if g["tip"]:
                     tx, ty = g["tip"][0] * z, g["tip"][1] * z
                     c.create_oval(tx - 6, ty - 6, tx + 6, ty + 6, fill="#FF8C00", outline="white", width=2, tags="ann")
@@ -1158,7 +1172,9 @@ class App:
             if not is_placed(lst[i]):
                 continue
             g = geometry(lst[i])
-            if math.hypot(ix - g["cx"], iy - g["cy"]) <= g["r"] + g["ring"] / 2 + tol * 0.5:
+            ex = g["rx"] + g["ring"] / 2 + tol * 0.5
+            ey = g["ry"] + g["ring"] / 2 + tol * 0.5
+            if ((ix - g["cx"]) / ex) ** 2 + ((iy - g["cy"]) / ey) ** 2 <= 1:
                 return i, "body"
             if g["seg"] and dist_point_seg(ix, iy, g["seg"]) <= max(lst[i]["width"], 1) / 2 + tol:
                 return i, "body"
@@ -1272,8 +1288,8 @@ class App:
         if g["shaft"]:
             c.create_polygon([v * z for p in g["shaft"] for v in p], fill=a["c_arrow"], outline="", tags="ghost")
             c.create_polygon([v * z for p in g["head"] for v in p], fill=a["c_arrow"], outline="", tags="ghost")
-        cx, cy, r = g["cx"] * z, g["cy"] * z, g["r"] * z
-        c.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#FFFFFF", outline=a["c_circle"],
+        cx, cy, rx, ry = g["cx"] * z, g["cy"] * z, g["rx"] * z, g["ry"] * z
+        c.create_oval(cx - rx, cy - ry, cx + rx, cy + ry, fill="#FFFFFF", outline=a["c_circle"],
                       width=max(1, g["ring"] * z), tags="ghost")
         c.create_text(cx, cy, text=str(a["num"]), fill=a["c_text"],
                       font=("Arial", -max(1, int(round(a["font_size"] * z))), "bold"), tags="ghost")
@@ -1285,7 +1301,9 @@ class App:
         a["arrow"] = True
         a["angle"] = math.degrees(math.atan2(-dy, dx)) % 360
         if not keep_len:
-            a["length"] = max(5.0, math.hypot(dx, dy) - g["r"] - g["ring"] / 2)
+            dist = math.hypot(dx, dy) or 1.0
+            edge = ellipse_dist(g["rx"] + g["ring"] / 2, g["ry"] + g["ring"] / 2, dx / dist, dy / dist)
+            a["length"] = max(5.0, dist - edge)
 
     def on_motion(self, e):
         d = self.drag
