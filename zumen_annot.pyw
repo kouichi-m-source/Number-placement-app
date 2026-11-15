@@ -834,7 +834,8 @@ class App:
     def show_hints(self):
         messagebox.showinfo(APP_NAME, (
             "・空いている所をダブルクリック: 新しい番号を配置(ダブルクリックのまま押し続けてドラッグで矢印の向き)\n"
-            "・注記をドラッグ: 移動 / 矢印の先の ● をドラッグ: 向き(共通OFFなら長さも)\n"
+            "・〇をドラッグ: 注記の移動 / 矢印の軸をドラッグ: 向きの調整(長さはそのまま)\n"
+            "・矢印の先の ● をドラッグ: ●がマウスに付いてきて向きと長さが変わる(共通ONの矢印は、離すと長さが共通値に戻る。Shiftで長さを固定)\n"
             "・矢印を増やす: 注記を右クリック(図面でも表でも) > 矢印を追加。2本目以降は表の子行(└矢印2…)に出ます\n"
             "・矢印が重なって選びにくいとき: 表で行を選ぶか、Alt+クリックで重なっている次の候補を選べます\n"
             "・文字サイズ・矢印の長さ/太さ・色は、上の共通ステータスを入力して「更新」で、\n"
@@ -1234,7 +1235,7 @@ class App:
         return self.canvas.canvasx(e.x) / self.zoom, self.canvas.canvasy(e.y) / self.zoom
 
     def hit_test(self, ix, iy, skip_sel=False):
-        """クリック位置の注記を探す。戻り値 (注記の番号, "tip"|"body", 矢印番号) または None。
+        """クリック位置の注記を探す。戻り値 (注記の番号, "tip"|"shaft"|"circle", 矢印番号) または None。
         矢印番号: 0=1本目, 1以上=2本目以降, None=〇の部分(矢印の選択は変えない)。
         優先順位: ①選んでいる矢印の先端● ②選んでいる注記のほかの矢印の先端● ③選んでいる矢印の軸
                   ④選んでいる注記の〇 ⑤ほかの注記の〇(手前のもの) ⑥ほかの矢印(クリック位置にいちばん近いもの)
@@ -1260,15 +1261,15 @@ class App:
                     return self.sel, "tip", k
             for k, col, sh in shapes:
                 if k == self.sel_arrow and shaft_gap(sh) <= tol:
-                    return self.sel, "body", k
+                    return self.sel, "shaft", k
             if in_circle(g):
-                return self.sel, "body", None
+                return self.sel, "circle", None
         for i in range(len(lst) - 1, -1, -1):
             a = lst[i]
             if not is_placed(a) or i == self.sel:
                 continue
             if in_circle(geometry(a)):
-                return i, "body", None
+                return i, "circle", None
         best = None
         for i in range(len(lst) - 1, -1, -1):
             a = lst[i]
@@ -1281,7 +1282,7 @@ class App:
                 if d <= tol and (best is None or d < best[0]):
                     best = (d, i, k)
         if best:
-            return best[1], "body", best[2]
+            return best[1], "shaft", best[2]
         return None
 
     def next_number_from_ui(self):
@@ -1301,7 +1302,9 @@ class App:
             k = self.sel_arrow if idx == self.sel else 0
         self.sel, self.sel_arrow = idx, k
         a = self.anns()[idx]
-        self.drag = {"mode": "tip" if part == "tip" else "move", "idx": idx, "arrow": k,
+        # 〇をドラッグ=注記の移動 / 矢印の軸・先端の●をドラッグ=矢印の向きの調整(注記は動かない)
+        mode = {"tip": "tip", "shaft": "shaft"}.get(part, "move")
+        self.drag = {"mode": mode, "idx": idx, "arrow": k, "x0": ix, "y0": iy,
                      "dx": a["x"] - ix, "dy": a["y"] - iy, "pushed": False}
         self.redraw_annotations()
         self.sync_table_sel()
@@ -1429,23 +1432,43 @@ class App:
                 self.push_undo()
                 d["pushed"] = True
             a["x"], a["y"] = ix + d["dx"], iy + d["dy"]
-        elif d["mode"] == "tip":
-            k = d.get("arrow", 0)
-            arrow = a if k == 0 else (a["extra"][k - 1] if k - 1 < len(a["extra"]) else None)
+        elif d["mode"] in ("tip", "shaft"):
+            arrow = self.drag_arrow(d)
             if arrow is None:
                 return
+            if d["mode"] == "shaft":  # 軸をつかんだときは、少し動かしてから向きを変える(クリックだけなら選択のみ)
+                if math.hypot(ix - d["x0"], iy - d["y0"]) * self.zoom < 4 and not d.get("active"):
+                    return
+                d["active"] = True
             if not d["pushed"]:
                 self.push_undo()
                 d["pushed"] = True
-            # 共通ONの矢印は長さを共通値のまま保つ(向きだけ変える)
-            self.aim(a, arrow, ix, iy, keep_len=bool(e.state & 0x1) or arrow["common"])
+            # 先端の●をつかんだときは、●がマウスに付いてくる(長さも変わる)。軸をつかんだとき・Shiftを押しているときは、長さを保つ
+            self.aim(a, arrow, ix, iy, keep_len=(d["mode"] == "shaft") or bool(e.state & 0x1))
         elif d["mode"] == "new":
             if math.hypot(ix - d["x0"], iy - d["y0"]) * self.zoom >= 8:
                 self.aim(a, a, ix, iy, keep_len=a["common"])
         self.redraw_annotations()
 
+    def drag_arrow(self, d):
+        """ドラッグ中の矢印(1本目なら注記自身、2本目以降なら extra の要素)。なければNone"""
+        lst = self.anns()
+        if d["idx"] >= len(lst):
+            return None
+        a = lst[d["idx"]]
+        k = d.get("arrow", 0)
+        if k == 0:
+            return a
+        return a["extra"][k - 1] if k - 1 < len(a["extra"]) else None
+
     def on_release(self, e):
-        if self.drag:
+        d = self.drag
+        if d:
+            if d["mode"] == "tip" and d.get("pushed"):
+                arrow = self.drag_arrow(d)
+                if arrow is not None and arrow["common"]:  # 共通ONの矢印は、離すと長さが共通値に戻る(向きは残る)
+                    arrow["length"] = self.common["length"]
+                    self.redraw_annotations()
             self.refresh_table()
         self.drag = None
 

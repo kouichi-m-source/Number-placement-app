@@ -5,6 +5,11 @@ on:
     tags:
       - "V*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "既存のリリースのタグ(例 V1.0.3)。入れると、そのリリースの exe だけを最新のコードで入れ替える(タイトル・説明・タグは変えない)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -45,6 +50,14 @@ jobs:
         with:
           name: number-placement-app
           path: dist/number-placement-app.exe
+
+      - name: Replace exe of an existing release (manual runs with a tag)
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: dist/number-placement-app.exe
+          fail_on_unmatched_files: true
 
       - name: Attach to release (tag runs)
         if: startsWith(github.ref, 'refs/tags/')
