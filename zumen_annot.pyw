@@ -39,6 +39,13 @@ PDF_DPI = 150
 SS = 4  # 書き出し時のスーパーサンプリング倍率(アンチエイリアス)
 MAX_DISPLAY_PIXELS = 60_000_000
 DEFAULT_ANGLE = 45.0
+# Alt キーの状態ビット。Windows の Tk では 0x8 は NumLock なので、Alt は 0x20000 だけで判定する(Linux/Mac の Alt は 0x8)
+ALT_MASK = 0x20000 if sys.platform == "win32" else 0x8
+
+
+def is_alt(state):
+    return bool(state & ALT_MASK)
+
 
 # 名前付きの基本色パレット
 PALETTE = [
@@ -1316,7 +1323,7 @@ class App:
         if self.base_img is None:
             return
         ix, iy = self.to_img(e)
-        if self.start_hit_drag(ix, iy, bool(e.state & 0x20008)):  # Alt+クリック: 重なっている次の候補を選ぶ
+        if self.start_hit_drag(ix, iy, is_alt(e.state)):  # Alt+クリック: 重なっている次の候補を選ぶ
             return
         cur = self.cur_ann()
         if cur is not None and not is_placed(cur):
@@ -1330,7 +1337,7 @@ class App:
         if self.base_img is None:
             return
         ix, iy = self.to_img(e)
-        if self.start_hit_drag(ix, iy, bool(e.state & 0x20008)):
+        if self.start_hit_drag(ix, iy, is_alt(e.state)):
             return
         self.remove_ghost()
         cur = self.cur_ann()
