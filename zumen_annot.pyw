@@ -48,6 +48,7 @@ PALETTE = [
 ]
 COLOR_FIELDS = [("c_text", "数字"), ("c_circle", "〇の枠"), ("c_arrow", "矢印")]
 COMMON_KEYS = ("font_size", "length", "width", "c_text", "c_circle", "c_arrow")
+ARROW_KEYS = ("length", "width", "c_arrow")  # 2本目以降の矢印が、共通ONのとき共通値に従う項目
 IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif", ".webp")
 
 # 用紙(縦向きの mm 寸法: 幅, 高さ。B判はJIS)
@@ -80,10 +81,28 @@ def is_placed(a):
 
 def make_ann(common, x=None, y=None, num="", angle=None, arrow=None):
     """注記を1件作る。共通部分は共通値で埋め、共通=ONで作る。未配置(x,y=None)なら番号・角度・矢印は空。"""
-    a = {"x": x, "y": y, "num": num, "arrow": arrow, "angle": angle, "common": True}
+    a = {"x": x, "y": y, "num": num, "arrow": arrow, "angle": angle, "common": True, "extra": []}
     for k in COMMON_KEYS:
         a[k] = common[k]
     return a
+
+
+def make_arrow(common, angle):
+    """2本目以降の矢印を1本作る(長さ・太さ・色は共通値、共通=ON)"""
+    return {"angle": float(angle), "length": common["length"], "width": common["width"],
+            "c_arrow": common["c_arrow"], "common": True}
+
+
+def free_angle(angles):
+    """既存の矢印の向きから最も離れた向き(15度刻み)を返す。矢印が重ならないように、追加する矢印の向きを決める。"""
+    if not angles:
+        return DEFAULT_ANGLE
+    best, score = DEFAULT_ANGLE, -1.0
+    for cand in range(0, 360, 15):
+        m = min(min(abs(cand - a) % 360, 360 - abs(cand - a) % 360) for a in angles)
+        if m > score:
+            best, score = float(cand), m
+    return best
 
 
 def apply_common_to_pages(pages, common):
@@ -95,6 +114,10 @@ def apply_common_to_pages(pages, common):
                 for k in COMMON_KEYS:
                     a[k] = common[k]
                 n += 1
+            for e in a.get("extra", []):
+                if e.get("common"):
+                    for k in ARROW_KEYS:
+                        e[k] = common[k]
     return n
 
 
@@ -145,6 +168,13 @@ def migrate_loaded(data):
             else:
                 a["arrow"] = None
                 a["angle"] = None
+            if not isinstance(a.get("extra"), list) or not is_placed(a):
+                a["extra"] = []
+            for e in a["extra"]:
+                e.setdefault("angle", DEFAULT_ANGLE)
+                e.setdefault("common", True)
+                for k in ARROW_KEYS:
+                    e.setdefault(k, common[k])
     return pages, common
 
 
@@ -187,6 +217,12 @@ def sort_rows(rows, mode):
     nums.sort(key=lambda t: t[0], reverse=rev)
     txts.sort(key=lambda t: t[0], reverse=rev)
     return [r for _, r in nums] + [r for _, r in txts] + blanks
+
+
+def table_child_values(pg, e, k):
+    """2本目以降の矢印の行(子行)。表の列の順(TREE_COLS)に合わせて返す。"""
+    return ("☑" if e["common"] else "☐", "└矢印%d" % (k + 1), "", "", "", "%g" % round(e["length"], 1),
+            "%g" % round(e["width"], 2), "", "%g" % round(e["angle"], 1), "", "", color_name(e["c_arrow"]))
 
 
 def contrast_fg(hx):
@@ -343,31 +379,52 @@ def compute_renumber(pages, mode, order):
     return changes
 
 
+def arrow_shape(cx, cy, rx, ry, ring, angle, length, width):
+    """矢印1本の図形(軸・矢じり・先端・当たり判定用の線分)。〇(楕円)の縁から出る。長さ0以下はNone。"""
+    if length <= 0:
+        return None
+    th = math.radians(angle)
+    dx, dy = math.cos(th), -math.sin(th)  # 角度0=右, 90=上(反時計回り)
+    px, py = -dy, dx
+    w = max(0.5, width)
+    start_r = ellipse_dist(rx + ring / 2, ry + ring / 2, dx, dy)
+    r_in = ellipse_dist(rx, ry, dx, dy)
+    sx, sy = cx + dx * r_in, cy + dy * r_in
+    tx, ty = cx + dx * (start_r + length), cy + dy * (start_r + length)
+    hl = max(1.0, min(w * 3.5 + 2, length))
+    hw = w * 1.7 + 1
+    bx, by = tx - dx * hl, ty - dy * hl
+    return {"shaft": [(sx + px * w / 2, sy + py * w / 2), (bx + px * w / 2, by + py * w / 2),
+                      (bx - px * w / 2, by - py * w / 2), (sx - px * w / 2, sy - py * w / 2)],
+            "head": [(tx, ty), (bx + px * hw, by + py * hw), (bx - px * hw, by - py * hw)],
+            "tip": (tx, ty), "seg": ((cx + dx * start_r, cy + dy * start_r), (tx, ty)), "width": w}
+
+
 def geometry(a):
-    """配置済みの注記1件の図形を画像座標で返す。"""
+    """配置済みの注記1件の図形を画像座標で返す。1本目の矢印は g の shaft/head/tip/seg、2本目以降は g["extras"]。"""
     cx, cy = a["x"], a["y"]
     rx, ry = circle_radii(a)
     ring = ring_width(a["font_size"])
     g = {"cx": cx, "cy": cy, "rx": rx, "ry": ry, "ring": ring,
-         "shaft": None, "head": None, "tip": None, "seg": None}
-    if a.get("arrow") and a["length"] > 0:
-        th = math.radians(a["angle"])
-        dx, dy = math.cos(th), -math.sin(th)  # 角度0=右, 90=上(反時計回り)
-        px, py = -dy, dx
-        w = max(0.5, a["width"])
-        start_r = ellipse_dist(rx + ring / 2, ry + ring / 2, dx, dy)
-        r_in = ellipse_dist(rx, ry, dx, dy)
-        sx, sy = cx + dx * r_in, cy + dy * r_in
-        tx, ty = cx + dx * (start_r + a["length"]), cy + dy * (start_r + a["length"])
-        hl = max(1.0, min(w * 3.5 + 2, a["length"]))
-        hw = w * 1.7 + 1
-        bx, by = tx - dx * hl, ty - dy * hl
-        g["shaft"] = [(sx + px * w / 2, sy + py * w / 2), (bx + px * w / 2, by + py * w / 2),
-                      (bx - px * w / 2, by - py * w / 2), (sx - px * w / 2, sy - py * w / 2)]
-        g["head"] = [(tx, ty), (bx + px * hw, by + py * hw), (bx - px * hw, by - py * hw)]
-        g["tip"] = (tx, ty)
-        g["seg"] = ((cx + dx * start_r, cy + dy * start_r), (tx, ty))
+         "shaft": None, "head": None, "tip": None, "seg": None, "width": 1.0, "extras": []}
+    if a.get("arrow"):
+        sh = arrow_shape(cx, cy, rx, ry, ring, a["angle"], a["length"], a["width"])
+        if sh:
+            g.update(sh)
+    for e in a.get("extra", []):
+        g["extras"].append(arrow_shape(cx, cy, rx, ry, ring, e["angle"], e["length"], e["width"]))
     return g
+
+
+def arrow_shapes(a, g):
+    """描く矢印の一覧 [(矢印番号, 色, 図形)]。矢印番号: 0=1本目, 1以上=2本目以降"""
+    out = []
+    if g["shaft"]:
+        out.append((0, a["c_arrow"], g))
+    for i, sh in enumerate(g["extras"]):
+        if sh:
+            out.append((i + 1, a["extra"][i]["c_arrow"], sh))
+    return out
 
 
 def scale_ann(a, s, ox=0.0, oy=0.0):
@@ -378,6 +435,7 @@ def scale_ann(a, s, ox=0.0, oy=0.0):
     b["font_size"] = a["font_size"] * s
     b["length"] = a["length"] * s
     b["width"] = a["width"] * s
+    b["extra"] = [{**e, "length": e["length"] * s, "width": e["width"] * s} for e in a.get("extra", [])]
     return b
 
 
@@ -422,10 +480,11 @@ def paste_annotation(base, a):
     g = geometry(a)
     xs = [g["cx"] - g["rx"] - g["ring"], g["cx"] + g["rx"] + g["ring"]]
     ys = [g["cy"] - g["ry"] - g["ring"], g["cy"] + g["ry"] + g["ring"]]
-    for key in ("shaft", "head"):
-        if g[key]:
-            xs += [p[0] for p in g[key]]
-            ys += [p[1] for p in g[key]]
+    shapes = arrow_shapes(a, g)
+    for k, col, sh in shapes:
+        for key in ("shaft", "head"):
+            xs += [p[0] for p in sh[key]]
+            ys += [p[1] for p in sh[key]]
     m = 4
     x0 = max(0, int(math.floor(min(xs))) - m)
     y0 = max(0, int(math.floor(min(ys))) - m)
@@ -439,9 +498,9 @@ def paste_annotation(base, a):
     def T(p):
         return ((p[0] - x0) * SS, (p[1] - y0) * SS)
 
-    if g["shaft"]:
-        d.polygon([T(p) for p in g["shaft"]], fill=a["c_arrow"])
-        d.polygon([T(p) for p in g["head"]], fill=a["c_arrow"])
+    for k, col, sh in shapes:
+        d.polygon([T(p) for p in sh["shaft"]], fill=col)
+        d.polygon([T(p) for p in sh["head"]], fill=col)
     Rx, Ry = g["rx"] + g["ring"] / 2, g["ry"] + g["ring"] / 2
     c = T((g["cx"], g["cy"]))
     d.ellipse([c[0] - Rx * SS, c[1] - Ry * SS, c[0] + Rx * SS, c[1] + Ry * SS],
@@ -538,6 +597,7 @@ class App:
         self.common = default_common()  # 「更新」で確定した共通値
         self.next_num = 1
         self.sel = None  # 表示中ページ内の選択注記のindex
+        self.sel_arrow = 0  # 選択中の矢印(0=1本目, 1以上=2本目以降)
         self.zoom = 1.0
         self.annot_path = None
         self.dirty = False
@@ -691,6 +751,8 @@ class App:
         for b in (2, 3):
             c.bind("<ButtonPress-%d>" % b, lambda e: c.scan_mark(e.x, e.y))
             c.bind("<B%d-Motion>" % b, lambda e: c.scan_dragto(e.x, e.y, gain=1))
+        c.bind("<ButtonPress-3>", self.on_rpress, add="+")
+        c.bind("<ButtonRelease-3>", self.on_rrelease)
         c.bind("<MouseWheel>", self.on_wheel)
         c.bind("<Button-4>", lambda e: self.on_wheel(e, 1))
         c.bind("<Button-5>", lambda e: self.on_wheel(e, -1))
@@ -752,6 +814,7 @@ class App:
         for t in (self.tree_l, self.tree_r):
             t.tag_configure("unplaced", foreground="#888888")
             t.tag_configure("dup", background="#FFF0B3")
+            t.tag_configure("child", foreground="#555555")
             t.tag_configure("selrow", background="#FF8C00", foreground="#FFFFFF")
             t.bind("<Button-1>", self.on_tree_click)
             t.bind("<Double-1>", self.on_tree_dbl)
@@ -772,6 +835,8 @@ class App:
         messagebox.showinfo(APP_NAME, (
             "・空いている所をダブルクリック: 新しい番号を配置(ダブルクリックのまま押し続けてドラッグで矢印の向き)\n"
             "・注記をドラッグ: 移動 / 矢印の先の ● をドラッグ: 向き(共通OFFなら長さも)\n"
+            "・矢印を増やす: 注記を右クリック(図面でも表でも) > 矢印を追加。2本目以降は表の子行(└矢印2…)に出ます\n"
+            "・矢印が重なって選びにくいとき: 表で行を選ぶか、Alt+クリックで重なっている次の候補を選べます\n"
             "・文字サイズ・矢印の長さ/太さ・色は、上の共通ステータスを入力して「更新」で、\n"
             "  共通ONの全注記(配置済みを含む)に反映されます\n"
             "・注記一覧(右の表)の「共通」列をOFFにした注記は、更新の対象から外れ、個別に編集できます\n"
@@ -892,6 +957,7 @@ class App:
         self.pages, self.common, self.next_num = copy.deepcopy(snap)
         self.v_next.set(str(self.next_num))
         self.sel = None
+        self.sel_arrow = 0
         self.load_common_to_ui()
         self.refresh_table()
         self.redraw_annotations()
@@ -998,6 +1064,7 @@ class App:
         self.cur_page = max(0, min(self.page_count - 1, page))
         self.base_img = self.get_base(self.cur_page)
         self.sel = None
+        self.sel_arrow = 0
         self.v_page.set("%d / %d" % (self.cur_page + 1, self.page_count))
         self.fit()
         self.refresh_table()
@@ -1141,9 +1208,10 @@ class App:
             if not is_placed(a):
                 continue
             g = geometry(a)
-            if g["shaft"]:
-                c.create_polygon([v * z for p in g["shaft"] for v in p], fill=a["c_arrow"], outline="", tags="ann")
-                c.create_polygon([v * z for p in g["head"] for v in p], fill=a["c_arrow"], outline="", tags="ann")
+            shapes = arrow_shapes(a, g)
+            for k, col, sh in shapes:
+                c.create_polygon([v * z for p in sh["shaft"] for v in p], fill=col, outline="", tags="ann")
+                c.create_polygon([v * z for p in sh["head"] for v in p], fill=col, outline="", tags="ann")
             cx, cy, rx, ry = g["cx"] * z, g["cy"] * z, g["rx"] * z, g["ry"] * z
             c.create_oval(cx - rx, cy - ry, cx + rx, cy + ry, fill="#FFFFFF", outline=a["c_circle"],
                           width=max(1, g["ring"] * z), tags="ann")
@@ -1152,32 +1220,68 @@ class App:
             if i == self.sel:
                 m = g["ring"] * z / 2 + 4
                 c.create_oval(cx - rx - m, cy - ry - m, cx + rx + m, cy + ry + m, outline="#FF8C00", dash=(4, 3), width=2, tags="ann")
-                if g["tip"]:
-                    tx, ty = g["tip"][0] * z, g["tip"][1] * z
-                    c.create_oval(tx - 6, ty - 6, tx + 6, ty + 6, fill="#FF8C00", outline="white", width=2, tags="ann")
+                for k, col, sh in shapes:
+                    tx, ty = sh["tip"][0] * z, sh["tip"][1] * z
+                    if k == self.sel_arrow:  # 選んでいる矢印: オレンジの枠と大きな●
+                        for key in ("shaft", "head"):
+                            c.create_polygon([v * z for p in sh[key] for v in p], fill="", outline="#FF8C00", width=2, tags="ann")
+                        c.create_oval(tx - 6, ty - 6, tx + 6, ty + 6, fill="#FF8C00", outline="white", width=2, tags="ann")
+                    else:  # ほかの矢印: 小さな●(ここをクリックしてそのまま向きを変えられる)
+                        c.create_oval(tx - 4, ty - 4, tx + 4, ty + 4, fill="white", outline="#FF8C00", width=2, tags="ann")
 
     # ---- マウス操作(図面) -----------------------------------------------
     def to_img(self, e):
         return self.canvas.canvasx(e.x) / self.zoom, self.canvas.canvasy(e.y) / self.zoom
 
-    def hit_test(self, ix, iy):
+    def hit_test(self, ix, iy, skip_sel=False):
+        """クリック位置の注記を探す。戻り値 (注記の番号, "tip"|"body", 矢印番号) または None。
+        矢印番号: 0=1本目, 1以上=2本目以降, None=〇の部分(矢印の選択は変えない)。
+        優先順位: ①選んでいる矢印の先端● ②選んでいる注記のほかの矢印の先端● ③選んでいる矢印の軸
+                  ④選んでいる注記の〇 ⑤ほかの注記の〇(手前のもの) ⑥ほかの矢印(クリック位置にいちばん近いもの)
+        skip_sel=True(Alt+クリック)は、選んでいる矢印・〇を除いて探すので、重なっている次の候補を選べる。"""
         lst = self.anns()
         tol = 6 / self.zoom
-        a = self.cur_ann()
-        if a is not None and is_placed(a):
-            g = geometry(a)
-            if g["tip"] and math.hypot(ix - g["tip"][0], iy - g["tip"][1]) <= 10 / self.zoom:
-                return self.sel, "tip"
-        for i in range(len(lst) - 1, -1, -1):
-            if not is_placed(lst[i]):
-                continue
-            g = geometry(lst[i])
+        sa = self.cur_ann()
+        sel_ok = sa is not None and is_placed(sa) and not skip_sel
+
+        def in_circle(g):
             ex = g["rx"] + g["ring"] / 2 + tol * 0.5
             ey = g["ry"] + g["ring"] / 2 + tol * 0.5
-            if ((ix - g["cx"]) / ex) ** 2 + ((iy - g["cy"]) / ey) ** 2 <= 1:
-                return i, "body"
-            if g["seg"] and dist_point_seg(ix, iy, g["seg"]) <= max(lst[i]["width"], 1) / 2 + tol:
-                return i, "body"
+            return ((ix - g["cx"]) / ex) ** 2 + ((iy - g["cy"]) / ey) ** 2 <= 1
+
+        def shaft_gap(sh):
+            return dist_point_seg(ix, iy, sh["seg"]) - max(sh["width"], 1) / 2
+
+        if sel_ok:
+            g = geometry(sa)
+            shapes = arrow_shapes(sa, g)
+            for k, col, sh in sorted(shapes, key=lambda t: 0 if t[0] == self.sel_arrow else 1):
+                if math.hypot(ix - sh["tip"][0], iy - sh["tip"][1]) <= 10 / self.zoom:
+                    return self.sel, "tip", k
+            for k, col, sh in shapes:
+                if k == self.sel_arrow and shaft_gap(sh) <= tol:
+                    return self.sel, "body", k
+            if in_circle(g):
+                return self.sel, "body", None
+        for i in range(len(lst) - 1, -1, -1):
+            a = lst[i]
+            if not is_placed(a) or i == self.sel:
+                continue
+            if in_circle(geometry(a)):
+                return i, "body", None
+        best = None
+        for i in range(len(lst) - 1, -1, -1):
+            a = lst[i]
+            if not is_placed(a):
+                continue
+            for k, col, sh in arrow_shapes(a, geometry(a)):
+                if i == self.sel and k == self.sel_arrow and skip_sel:
+                    continue
+                d = shaft_gap(sh)
+                if d <= tol and (best is None or d < best[0]):
+                    best = (d, i, k)
+        if best:
+            return best[1], "body", best[2]
         return None
 
     def next_number_from_ui(self):
@@ -1186,16 +1290,18 @@ class App:
         except ValueError:
             return self.next_num
 
-    def start_hit_drag(self, ix, iy):
+    def start_hit_drag(self, ix, iy, alt=False):
         """既存の注記の上なら、選択して移動/矢印先端ドラッグを始める(Trueを返す)"""
-        hit = self.hit_test(ix, iy)
+        hit = self.hit_test(ix, iy, skip_sel=alt)
         if not hit:
             return False
-        idx, part = hit
+        idx, part, k = hit
         self.remove_ghost()
-        self.sel = idx
+        if k is None:  # 〇をクリック: 同じ注記なら選んでいる矢印はそのまま
+            k = self.sel_arrow if idx == self.sel else 0
+        self.sel, self.sel_arrow = idx, k
         a = self.anns()[idx]
-        self.drag = {"mode": "tip" if part == "tip" else "move", "idx": idx,
+        self.drag = {"mode": "tip" if part == "tip" else "move", "idx": idx, "arrow": k,
                      "dx": a["x"] - ix, "dy": a["y"] - iy, "pushed": False}
         self.redraw_annotations()
         self.sync_table_sel()
@@ -1207,7 +1313,7 @@ class App:
         if self.base_img is None:
             return
         ix, iy = self.to_img(e)
-        if self.start_hit_drag(ix, iy):
+        if self.start_hit_drag(ix, iy, bool(e.state & 0x20008)):  # Alt+クリック: 重なっている次の候補を選ぶ
             return
         cur = self.cur_ann()
         if cur is not None and not is_placed(cur):
@@ -1221,7 +1327,7 @@ class App:
         if self.base_img is None:
             return
         ix, iy = self.to_img(e)
-        if self.start_hit_drag(ix, iy):
+        if self.start_hit_drag(ix, iy, bool(e.state & 0x20008)):
             return
         self.remove_ghost()
         cur = self.cur_ann()
@@ -1229,6 +1335,7 @@ class App:
             # 表で選んでいる未配置の行を、ダブルクリックした位置に配置する
             self.push_undo()
             cur["x"], cur["y"] = ix, iy
+            self.sel_arrow = 0
             cur["arrow"] = True
             cur["angle"] = DEFAULT_ANGLE
             if not str(cur["num"]).strip():
@@ -1249,6 +1356,7 @@ class App:
         a = make_ann(self.common, ix, iy, str(n), DEFAULT_ANGLE, True)
         self.anns().append(a)
         self.sel = len(self.anns()) - 1
+        self.sel_arrow = 0
         self.next_num = n + 1
         self.v_next.set(str(self.next_num))
         self.drag = {"mode": "new", "idx": self.sel, "x0": ix, "y0": iy, "pushed": True}
@@ -1295,15 +1403,17 @@ class App:
                       font=("Arial", -max(1, int(round(a["font_size"] * z))), "bold"), tags="ghost")
         c.configure(cursor="none")
 
-    def aim(self, a, ix, iy, keep_len=False):
-        g = geometry({**a, "arrow": False})
-        dx, dy = ix - a["x"], iy - a["y"]
-        a["arrow"] = True
-        a["angle"] = math.degrees(math.atan2(-dy, dx)) % 360
+    def aim(self, ann, arrow, ix, iy, keep_len=False):
+        """矢印arrow(1本目ならann自身、2本目以降ならann["extra"]の要素)を、(ix,iy)の向きにする"""
+        g = geometry({**ann, "arrow": False, "extra": []})
+        dx, dy = ix - ann["x"], iy - ann["y"]
+        if arrow is ann:
+            ann["arrow"] = True
+        arrow["angle"] = math.degrees(math.atan2(-dy, dx)) % 360
         if not keep_len:
             dist = math.hypot(dx, dy) or 1.0
             edge = ellipse_dist(g["rx"] + g["ring"] / 2, g["ry"] + g["ring"] / 2, dx / dist, dy / dist)
-            a["length"] = max(5.0, dist - edge)
+            arrow["length"] = max(5.0, dist - edge)
 
     def on_motion(self, e):
         d = self.drag
@@ -1320,14 +1430,18 @@ class App:
                 d["pushed"] = True
             a["x"], a["y"] = ix + d["dx"], iy + d["dy"]
         elif d["mode"] == "tip":
+            k = d.get("arrow", 0)
+            arrow = a if k == 0 else (a["extra"][k - 1] if k - 1 < len(a["extra"]) else None)
+            if arrow is None:
+                return
             if not d["pushed"]:
                 self.push_undo()
                 d["pushed"] = True
-            # 共通ONの注記は長さを共通値のまま保つ(向きだけ変える)
-            self.aim(a, ix, iy, keep_len=bool(e.state & 0x1) or a["common"])
+            # 共通ONの矢印は長さを共通値のまま保つ(向きだけ変える)
+            self.aim(a, arrow, ix, iy, keep_len=bool(e.state & 0x1) or arrow["common"])
         elif d["mode"] == "new":
             if math.hypot(ix - d["x0"], iy - d["y0"]) * self.zoom >= 8:
-                self.aim(a, ix, iy, keep_len=a["common"])
+                self.aim(a, a, ix, iy, keep_len=a["common"])
         self.redraw_annotations()
 
     def on_release(self, e):
@@ -1343,6 +1457,7 @@ class App:
 
     def select(self, idx):
         self.sel = idx
+        self.sel_arrow = 0
         self.redraw_annotations()
         self.sync_table_sel()
 
@@ -1352,13 +1467,63 @@ class App:
         self.delete_selected()
 
     def delete_selected(self):
-        if self.cur_ann() is None:
+        a = self.cur_ann()
+        if a is None:
+            return
+        if 1 <= self.sel_arrow <= len(a["extra"]):  # 2本目以降の矢印を選んでいるときは、その矢印だけ消す
+            self.push_undo()
+            del a["extra"][self.sel_arrow - 1]
+            self.sel_arrow = 0
+            self.refresh_table()
+            self.redraw_annotations()
+            self.v_status.set("矢印を削除しました")
             return
         self.push_undo()
         del self.anns()[self.sel]
         self.sel = None
+        self.sel_arrow = 0
         self.refresh_table()
         self.redraw_annotations()
+
+    def add_arrow(self):
+        """選んでいる注記に、矢印を1本追加する(向きは既存の矢印と重ならない向き。長さ・太さ・色は共通値)"""
+        a = self.cur_ann()
+        if a is None or not is_placed(a):
+            messagebox.showinfo(APP_NAME, "配置済みの注記を選んでから実行してください。")
+            return
+        angles = ([a["angle"]] if a.get("arrow") else []) + [e["angle"] for e in a["extra"]]
+        self.push_undo()
+        a["extra"].append(make_arrow(self.common, free_angle(angles)))
+        self.sel_arrow = len(a["extra"])
+        self.refresh_table()
+        self.redraw_annotations()
+        self.v_status.set("矢印を追加しました(矢印%d)。先端の●をドラッグして向きを変えられます" % (self.sel_arrow + 1))
+
+    def on_rpress(self, e):
+        self._rp = (e.x, e.y)
+
+    def on_rrelease(self, e):
+        """右クリック(動かさずに離したとき)でメニューを出す。右ボタンのドラッグは、これまでどおり画面の移動"""
+        rp, self._rp = getattr(self, "_rp", None), None
+        if rp is None or self.base_img is None or math.hypot(e.x - rp[0], e.y - rp[1]) > 4:
+            return
+        ix, iy = self.to_img(e)
+        hit = self.hit_test(ix, iy)
+        if not hit:
+            return
+        idx, part, k = hit
+        if k is None:
+            k = self.sel_arrow if idx == self.sel else 0
+        self.sel, self.sel_arrow = idx, k
+        self.redraw_annotations()
+        self.sync_table_sel()
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="矢印を追加", command=self.add_arrow)
+        m.add_command(label="この矢印を削除" if k >= 1 else "この注記を削除", command=self.delete_selected)
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
 
     # ---- 注記一覧(表) ---------------------------------------------------
     def cancel_edit(self):
@@ -1428,16 +1593,25 @@ class App:
                 status, tags = "重複", ("dup",)
             else:
                 status, tags = "", ()
-            vals = table_row_values(pg, a, status)
-            iid = "%d:%d" % (pg, i)
-            self._row_tags[iid] = tags
-            self.tree_l.insert("", "end", iid=iid, values=vals[:TREE_FIXED], tags=tags)
-            self.tree_r.insert("", "end", iid=iid, values=vals[TREE_FIXED:], tags=tags)
+            self.insert_table_row("%d:%d" % (pg, i), table_row_values(pg, a, status), tags)
+            for k, e in enumerate(a.get("extra", []), 1):  # 2本目以降の矢印は、注記の下の子行
+                self.insert_table_row("%d:%d:%d" % (pg, i, k), table_child_values(pg, e, k), ("child",))
         self.sync_table_sel()
 
+    def insert_table_row(self, iid, vals, tags):
+        self._row_tags[iid] = tags
+        self.tree_l.insert("", "end", iid=iid, values=vals[:TREE_FIXED], tags=tags)
+        self.tree_r.insert("", "end", iid=iid, values=vals[TREE_FIXED:], tags=tags)
+
     def sync_table_sel(self):
-        """図面で選んだ注記に対応する表の行を、オレンジで目立たせる"""
-        iid = "%d:%d" % (self.cur_page, self.sel) if self.sel is not None else None
+        """図面で選んだ注記(矢印)に対応する表の行を、オレンジで目立たせる"""
+        iid = None
+        if self.sel is not None:
+            iid = "%d:%d" % (self.cur_page, self.sel)
+            if self.sel_arrow:
+                iid += ":%d" % self.sel_arrow
+            if iid not in self._row_tags:
+                iid = "%d:%d" % (self.cur_page, self.sel)
         old = self._sel_iid
         for t in (self.tree_l, self.tree_r):
             if old and old != iid and t.exists(old):
@@ -1451,15 +1625,17 @@ class App:
         self._sel_iid = iid if (iid and self.tree_l.exists(iid)) else None
 
     def parse_iid(self, iid):
-        pg, idx = iid.split(":")
-        return int(pg), int(idx)
+        """行のid → (ページ, 注記の番号, 矢印番号)。矢印番号は 0=注記の行(1本目), 1以上=子行(2本目以降)"""
+        parts = iid.split(":")
+        return int(parts[0]), int(parts[1]), (int(parts[2]) if len(parts) > 2 else 0)
 
-    def select_row(self, pg, idx):
+    def select_row(self, pg, idx, k=0):
         if self.base_img is None:
             return
         if pg != self.cur_page:
             self.go_page(pg)
         self.sel = idx
+        self.sel_arrow = k
         self.redraw_annotations()
         self.sync_table_sel()
         a = self.cur_ann()
@@ -1481,10 +1657,14 @@ class App:
         iid, cid = self.row_at(event)
         if not iid:
             return
-        pg, idx = self.parse_iid(iid)
-        self.select_row(pg, idx)
+        pg, idx, k = self.parse_iid(iid)
+        self.select_row(pg, idx, k)
         a = self.cur_ann()
         if a is None:
+            return "break"
+        if k >= 1:
+            if cid == "com" and k <= len(a["extra"]):
+                self.toggle_arrow_common(a["extra"][k - 1])
             return "break"
         if cid == "com":
             self.toggle_common(a)
@@ -1505,14 +1685,38 @@ class App:
         self.redraw_annotations()
         self.v_status.set("共通 " + ("ON: 共通ステータスの値に揃えました" if a["common"] else "OFF: 一律更新の対象から外れ、個別に編集できます"))
 
+    def toggle_arrow_common(self, e):
+        self.push_undo()
+        e["common"] = not e["common"]
+        if e["common"]:
+            for k in ARROW_KEYS:
+                e[k] = self.common[k]
+        self.refresh_table()
+        self.redraw_annotations()
+        self.v_status.set("矢印の共通 " + ("ON: 共通ステータスの長さ・太さ・色に揃えました" if e["common"] else "OFF: 一律更新の対象から外れ、個別に編集できます"))
+
     def on_tree_dbl(self, event):
         iid, cid = self.row_at(event)
         if not iid:
             return "break"
-        pg, idx = self.parse_iid(iid)
-        self.select_row(pg, idx)
+        pg, idx, k = self.parse_iid(iid)
+        self.select_row(pg, idx, k)
         a = self.cur_ann()
-        if a is None or cid in ("com", "arw", "pg", "st"):
+        if a is None:
+            return "break"
+        if k >= 1:  # 子行(2本目以降の矢印): 長さ・太さ・色は共通OFFのときだけ、角度はいつでも編集できる
+            if k > len(a["extra"]):
+                return "break"
+            e = a["extra"][k - 1]
+            if cid in ("ln", "wd", "ca") and e["common"]:
+                self.v_status.set("共通がONのため編集できません。「共通」列をクリックしてOFFにしてください")
+            elif cid == "ca":
+                self.popup_palette(self.tree_r, e["c_arrow"], lambda hx, ee=e: self.set_arrow_color(ee, hx),
+                                   pos=(event.x_root, event.y_root))
+            elif cid in ("ln", "wd", "ang"):
+                self.edit_cell(iid, cid)
+            return "break"
+        if cid in ("com", "arw", "pg", "st"):
             return "break"
         if cid in COMMON_CELLS and a["common"]:
             self.v_status.set("共通がONのため編集できません。「共通」列をクリックしてOFFにしてください")
@@ -1532,7 +1736,7 @@ class App:
         bbox = tree.bbox(iid, cid)
         if not bbox:
             return
-        pg, idx = self.parse_iid(iid)
+        pg, idx, k = self.parse_iid(iid)
         cur = tree.set(iid, cid)
         self.cancel_edit()
         x, y, w, h = bbox
@@ -1549,18 +1753,40 @@ class App:
             text = ent.get()
             self._edit = None
             ent.destroy()
-            self.set_cell(pg, idx, cid, text)
+            self.set_cell(pg, idx, cid, text, k)
 
         ent.bind("<Return>", commit)
         ent.bind("<KP_Enter>", commit)
         ent.bind("<FocusOut>", commit)
         ent.bind("<Escape>", lambda ev: self.cancel_edit())
 
-    def set_cell(self, pg, idx, cid, text):
+    def set_cell(self, pg, idx, cid, text, k=0):
         if pg not in self.pages or idx >= len(self.pages[pg]):
             return
         a = self.pages[pg][idx]
         text = text.strip()
+        if k >= 1:  # 子行(2本目以降の矢印)
+            if k > len(a["extra"]):
+                return
+            e = a["extra"][k - 1]
+            try:
+                if cid == "ang":
+                    key, v = "angle", float(text) % 360
+                elif cid in ("ln", "wd") and not e["common"]:
+                    key = COMMON_CELLS[cid]
+                    lo, hi = CLAMPS[key]
+                    v = min(hi, max(lo, float(text)))
+                else:
+                    return
+            except ValueError:
+                return
+            if v == e[key]:
+                return
+            self.push_undo()
+            e[key] = v
+            self.refresh_table()
+            self.redraw_annotations()
+            return
         if cid == "num":
             if text == str(a["num"]):
                 return
@@ -1593,6 +1819,14 @@ class App:
         self.refresh_table()
         self.redraw_annotations()
 
+    def set_arrow_color(self, e, hx):
+        if e["common"] or e["c_arrow"].lower() == hx.lower():
+            return
+        self.push_undo()
+        e["c_arrow"] = hx
+        self.refresh_table()
+        self.redraw_annotations()
+
     def set_color_value(self, a, key, hx):
         if a["common"] or a[key].lower() == hx.lower():
             return
@@ -1605,11 +1839,14 @@ class App:
         iid, cid = self.row_at(event)
         if not iid:
             return
-        pg, idx = self.parse_iid(iid)
-        self.select_row(pg, idx)
+        pg, idx, k = self.parse_iid(iid)
+        self.select_row(pg, idx, k)
         m = tk.Menu(self.root, tearoff=0)
+        a = self.cur_ann()
+        if a is not None and is_placed(a):
+            m.add_command(label="矢印を追加", command=self.add_arrow)
         m.add_command(label="下に行を挿入", command=self.insert_row_below)
-        m.add_command(label="この行を削除", command=self.delete_selected)
+        m.add_command(label="この矢印を削除" if k >= 1 else "この行を削除", command=self.delete_selected)
         try:
             m.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1627,6 +1864,7 @@ class App:
         i = self.sel + 1
         self.anns().insert(i, make_ann(self.common))
         self.sel = i
+        self.sel_arrow = 0
         self.refresh_table()
         self.redraw_annotations()
         self.v_status.set("行を挿入しました。番号をダブルクリックで入力し、図面をダブルクリックすると配置されます(空なら自動採番)")
@@ -1835,6 +2073,7 @@ def run_selftest(out_path):
     def t_pillow():
         img = Image.new("RGB", (240, 140), "white")
         a = make_ann(default_common(), 120, 70, "12", 45, True)
+        a["extra"].append(make_arrow(default_common(), 200))
         out = render_annotations(img, [a])
         if out.getextrema() == ((255, 255), (255, 255), (255, 255)):
             raise RuntimeError("注記が描かれていません")
