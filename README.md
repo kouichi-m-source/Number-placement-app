@@ -1,17 +1,9 @@
 # 番号配置アプリ
 
+<img src="assets/icon.png" width="96" align="right" alt="番号配置アプリのアイコン">
+
 図面(PDF・画像)の上に、〇付きの通し番号と矢印を配置するデスクトップアプリです(Python / Tkinter)。
 配置した注記は編集可能なまま保存でき、必要なときだけ画像(PNG)として書き出せます。
-
-## ダウンロード(exe版・Windows)
-
-Python のインストールなしで使えます。
-
-**[最新版をダウンロード(number-placement-app.exe)](https://github.com/kouichi-m-source/Number-placement-app/releases/latest/download/number-placement-app.exe)**
-/ [リリース一覧](https://github.com/kouichi-m-source/Number-placement-app/releases)
-
-初めて起動するときに、Windows の警告画面(「WindowsによってPCが保護されました」)が出ることがあります。
-その場合は「詳細情報」→「実行」をクリックしてください(コード署名をしていないため表示されます)。
 
 ## 主な機能
 
@@ -31,25 +23,15 @@ Python のインストールなしで使えます。
 - 「番号を振り直す」: 「欠番を詰める」(順序・重複はそのまま)、または「表の並び順に1から連番」を選べる
 - 編集用ファイル(`.annot`、JSON形式)での保存・再編集
 
-## 必要なもの
+## ダウンロード(exe版・Windows)
 
-- Python 3.9 以上(Tkinter が使える環境)
-- Pillow
-- PyMuPDF 1.x 系(PDFを開く場合。2.x は不要な大きな部品も一緒に入るため、1.x に固定しています)
+Python のインストールなしで使えます。
 
-```
-pip install -r requirements.txt
-```
+**[最新版をダウンロード(number-placement-app.exe)](https://github.com/kouichi-m-source/Number-placement-app/releases/latest/download/number-placement-app.exe)**
+/ [リリース一覧](https://github.com/kouichi-m-source/Number-placement-app/releases)
 
-## 起動
-
-```
-python zumen_annot.pyw
-```
-
-Windows では `zumen_annot.pyw` をダブルクリックでも起動できます。
-何も表示されずに終了する場合は、`zumen_annot_debug.bat` を実行すると、エラー内容が画面に表示されます。
-エラーは `zumen_annot_error.log` にも記録されます。
+初めて起動するときに、Windows の警告画面(「WindowsによってPCが保護されました」)が出ることがあります。
+その場合は「詳細情報」→「実行」をクリックしてください(コード署名をしていないため表示されます)。
 
 ## 使い方
 
@@ -77,13 +59,35 @@ Windows では `zumen_annot.pyw` をダブルクリックでも起動できま�
 | Ctrl+Z / Ctrl+Y | 元に戻す / やり直し |
 | Ctrl+S / Ctrl+E | 保存 / PNG書き出し |
 
+## 必要なもの(Pythonで動かす場合)
+
+- Python 3.9 以上(Tkinter が使える環境)
+- Pillow
+- PyMuPDF 1.x 系(PDFを開く場合。2.x は不要な大きな部品も一緒に入るため、1.x に固定しています)
+
+```
+pip install -r requirements.txt
+```
+
+## 起動(Pythonで動かす場合)
+
+```
+python zumen_annot.pyw
+```
+
+Windows では `zumen_annot.pyw` をダブルクリックでも起動できます。
+何も表示されずに終了する場合は、`zumen_annot_debug.bat` を実行すると、エラー内容が画面に表示されます。
+エラーは `zumen_annot_error.log` にも記録されます。
+
 ## 編集ファイル(.annot)について
 
 - JSON形式で、背景の図面のパス、ページごとの注記、共通ステータス、用紙設定を保存します
 - 図面そのもの(PDF・画像)は含まれません。`.annot` と同じ場所、または保存時のパスに図面が必要です
 - 図面データや `.annot` を誤って公開しないよう、`.gitignore` で `*.annot` と `*.pdf` を除外しています
 
-## exe版のビルド(開発者向け)
+## 開発者向け
+
+### exe版のビルド
 
 タグ `V*`(例: `V1.0.0`)を push すると、GitHub Actions が Windows 用の exe をビルドして、
 リリースページに添付します(`.github/workflows/release.yml`)。
