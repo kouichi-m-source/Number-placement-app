@@ -1,0 +1,112 @@
+{
+ "version": 2,
+ "source": {
+  "path": "sample.png",
+  "rel": "sample.png",
+  "type": "image"
+ },
+ "pdf_dpi": 150,
+ "current_page": 0,
+ "common": {
+  "font_size": 34.0,
+  "length": 100.0,
+  "width": 5.0,
+  "c_text": "#000000",
+  "c_circle": "#000000",
+  "c_arrow": "#000000"
+ },
+ "next_num": 6,
+ "paper": {
+  "size": "A4",
+  "orient": "自動",
+  "margin": "10",
+  "dpi": "200"
+ },
+ "pages": {
+  "0": [
+   {
+    "x": 330,
+    "y": 330,
+    "num": "1",
+    "arrow": true,
+    "angle": 45.0,
+    "common": true,
+    "extra": [],
+    "font_size": 34.0,
+    "length": 100.0,
+    "width": 5.0,
+    "c_text": "#000000",
+    "c_circle": "#000000",
+    "c_arrow": "#000000"
+   },
+   {
+    "x": 1100,
+    "y": 380,
+    "num": "2",
+    "arrow": true,
+    "angle": 200.0,
+    "common": true,
+    "extra": [],
+    "font_size": 34.0,
+    "length": 100.0,
+    "width": 5.0,
+    "c_text": "#000000",
+    "c_circle": "#000000",
+    "c_arrow": "#000000"
+   },
+   {
+    "x": 520,
+    "y": 880,
+    "num": "3,4",
+    "arrow": true,
+    "angle": 300.0,
+    "common": true,
+    "extra": [
+     {
+      "angle": 160.0,
+      "length": 100.0,
+      "width": 5.0,
+      "c_arrow": "#000000",
+      "common": true
+     }
+    ],
+    "font_size": 34.0,
+    "length": 100.0,
+    "width": 5.0,
+    "c_text": "#000000",
+    "c_circle": "#000000",
+    "c_arrow": "#000000"
+   },
+   {
+    "x": 1000,
+    "y": 860,
+    "num": "5",
+    "arrow": true,
+    "angle": 120.0,
+    "common": false,
+    "extra": [],
+    "font_size": 34.0,
+    "length": 100.0,
+    "width": 5.0,
+    "c_text": "#FF0000",
+    "c_circle": "#FF0000",
+    "c_arrow": "#FF0000"
+   },
+   {
+    "x": null,
+    "y": null,
+    "num": "",
+    "arrow": null,
+    "angle": null,
+    "common": true,
+    "extra": [],
+    "font_size": 34.0,
+    "length": 100.0,
+    "width": 5.0,
+    "c_text": "#000000",
+    "c_circle": "#000000",
+    "c_arrow": "#000000"
+   }
+  ]
+ }
+}

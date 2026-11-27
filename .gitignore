@@ -23,3 +23,7 @@ zumen_annot_error.log
 Thumbs.db
 .vscode/
 .idea/
+
+# サンプル(動作確認用の架空の図面と編集ファイル)は公開する
+!samples/sample.annot
+!samples/sample.png

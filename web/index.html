@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>番号配置アプリ</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="番号配置">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#2b3a4a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <div id="bar1" class="bar">
+    <button class="btn" id="btnOpen">開く ▾</button>
+    <button class="btn" id="btnSave">保存</button>
+    <button class="btn" id="btnExport">書き出し ▾</button>
+    <span class="sep"></span>
+    <button class="btn sq" id="btnUndo" title="元に戻す">↶</button>
+    <button class="btn sq" id="btnRedo" title="やり直し">↷</button>
+    <button class="btn" id="btnDelete">削除</button>
+    <span class="sep"></span>
+    <button class="btn sq" id="btnPrev">◀</button>
+    <span id="pageLabel">- / -</span>
+    <button class="btn sq" id="btnNext">▶</button>
+    <span class="sep"></span>
+    <button class="btn sq" id="btnZoomOut">－</button>
+    <button class="btn sq" id="btnZoomIn">＋</button>
+    <button class="btn" id="btnFit">全体</button>
+    <span class="sep"></span>
+    <button class="btn" id="btnPlace" title="ONのとき、ダブルタップ(ダブルクリック)で新しい番号を置きます">新規配置 ON</button>
+    <span class="grow"></span>
+    <button class="btn" id="btnPaper">用紙 ▾</button>
+  </div>
+  <div id="bar2" class="bar">
+    <b>共通ステータス</b>
+    <label>文字サイズ <input id="pFs" type="number" inputmode="decimal" min="4" max="500" step="2"></label>
+    <label>矢印の長さ <input id="pLen" type="number" inputmode="decimal" min="0" max="10000" step="5"></label>
+    <label>矢印の太さ <input id="pWid" type="number" inputmode="decimal" min="0.5" max="200" step="0.5"></label>
+    <label>数字色 <button class="btn colorbtn" id="cText"></button></label>
+    <label>〇の枠色 <button class="btn colorbtn" id="cCircle"></button></label>
+    <label>矢印色 <button class="btn colorbtn" id="cArrow"></button></label>
+    <button class="btn primary" id="btnApply">更新</button>
+    <span id="pending"></span>
+    <span class="grow"></span>
+    <label>次の番号 <input id="vNext" type="number" inputmode="numeric" min="0" max="99999" step="1"></label>
+  </div>
+  <div id="main">
+    <div id="stage">
+      <canvas id="view"></canvas>
+      <div id="empty">
+        <div class="big">図面(PDF・画像)を開いてください</div>
+        <div><button class="btn primary" id="btnOpen2">図面を開く</button> <button class="btn" id="btnRestore2" hidden>前回の作業を復元</button></div>
+        <div class="small">空いている所をダブルタップで番号を置きます。長押し(右クリック)でメニューが出ます。</div>
+      </div>
+    </div>
+    <div id="sash"></div>
+    <aside id="panel">
+      <div id="summary"></div>
+      <div id="tableWrap"><table id="tbl"></table></div>
+      <div class="panelBtns">
+        <button class="btn" id="btnInsert">下に行を挿入</button>
+        <button class="btn" id="btnDelRow">行を削除</button>
+        <button class="btn" id="btnRenum">番号を振り直す</button>
+      </div>
+      <div class="tips">
+        ・行をタップで図面上の注記を選択 / 「共通」列のタップでON・OFF<br>
+        ・選んだ行のセルをもう一度タップで編集(共通OFFの行だけ、文字・長さ・太さ・色)<br>
+        ・「矢印」列のタップで有無を切替 / 行を長押し(右クリック)でメニュー
+      </div>
+    </aside>
+  </div>
+  <div id="status">図面を開いてください</div>
+</div>
+
+<div id="portrait"><div>iPadを<b>横向き</b>にしてお使いください<br><span>(この画面は横長の画面専用です)</span></div></div>
+<div id="menu" hidden></div>
+<div id="modalBack" hidden><div id="modal"></div></div>
+<input type="file" id="fileDrawing" hidden accept="application/pdf,image/*,.pdf,.png,.jpg,.jpeg,.bmp,.gif,.webp,.tif,.tiff">
+<input type="file" id="fileAnnot" hidden multiple>
+<script type="module" src="app.js"></script>
+</body>
+</html>
