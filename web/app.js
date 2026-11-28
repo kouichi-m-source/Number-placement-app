@@ -1234,20 +1234,32 @@ function rowMenu(tr, x, y) {
   $("#tableWrap").addEventListener("scroll", stop, { passive: true });
 })();
 
-// 表と図面の境界をドラッグして、表の幅を変える
+// 表と図面の境界をドラッグして、表の幅(縦持ちのときは高さ)を変える
 (() => {
   const sash = $("#sash"), panel = $("#panel");
+  const mq = window.matchMedia("(orientation: portrait)");
   let st = null;
-  sash.addEventListener("pointerdown", (e) => { sash.setPointerCapture(e.pointerId); st = { x: e.clientX, w: panel.offsetWidth }; });
+  sash.addEventListener("pointerdown", (e) => {
+    sash.setPointerCapture(e.pointerId);
+    st = { x: e.clientX, y: e.clientY, w: panel.offsetWidth, h: panel.offsetHeight, portrait: mq.matches };
+  });
   sash.addEventListener("pointermove", (e) => {
     if (!st) return;
-    const w = Math.max(240, Math.min(window.innerWidth - 300, st.w - (e.clientX - st.x)));
-    panel.style.flexBasis = w + "px"; panel.style.width = w + "px";
+    if (st.portrait) {
+      const h = Math.max(160, Math.min(window.innerHeight - 260, st.h - (e.clientY - st.y)));
+      panel.style.flexBasis = h + "px"; panel.style.height = h + "px";
+    } else {
+      const w = Math.max(240, Math.min(window.innerWidth - 300, st.w - (e.clientX - st.x)));
+      panel.style.flexBasis = w + "px"; panel.style.width = w + "px";
+    }
     resize();
   });
   const end = () => { st = null; };
   sash.addEventListener("pointerup", end);
   sash.addEventListener("pointercancel", end);
+  // 向きが変わったら、ドラッグで付けた寸法を捨てて向きごとの既定に戻す
+  const reset = () => { panel.style.flexBasis = ""; panel.style.width = ""; panel.style.height = ""; };
+  (mq.addEventListener ? mq.addEventListener("change", reset) : mq.addListener(reset));
 })();
 
 // ----------------------------------------------------------- ボタン類 ---

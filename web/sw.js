@@ -1,7 +1,7 @@
 // 番号配置アプリ(Web版) オフライン用の Service Worker
 // アプリ本体はネットワーク優先(つながるときは常に最新)、PDF表示用の部品(lib/)は一度取得したら端末に保存して使う。
 // アプリを更新したときは、VERSION を変えると古い保存が捨てられる。
-const VERSION = "v1";
+const VERSION = "v2";
 const CACHE = "npa-" + VERSION;
 const SHELL = [
   "./", "index.html", "style.css", "app.js", "core.js", "render.js", "io.js", "manifest.webmanifest",

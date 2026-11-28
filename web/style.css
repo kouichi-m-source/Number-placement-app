@@ -82,8 +82,12 @@ input[type=number], input[type=text], select {
 #modal .btns { display: flex; flex-direction: column; gap: 8px; }
 #modal .btns.row { flex-direction: row; justify-content: flex-end; }
 
-#portrait { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; background: #2b3a4a; color: #fff; text-align: center; font-size: 22px; line-height: 1.7; }
-#portrait span { font-size: 14px; color: #bcc8d4; }
-@media (orientation: portrait) and (max-width: 1100px) { #portrait { display: flex; } }
+/* 縦持ち: 図面を上、表を下に並べる */
+@media (orientation: portrait) {
+  #main { flex-direction: column; }
+  #sash { flex: 0 0 14px; cursor: row-resize; }
+  #panel { flex: 0 0 42%; width: auto; min-width: 0; min-height: 160px; }
+  #bar2 input[type=number] { width: 66px; }
+}
 
 [hidden] { display: none !important; }
