@@ -11,8 +11,8 @@ const DOUBLE_TAP_MS = 420;
 
 // ------------------------------------------------------------- 状態 ---
 const S = {
-  srcName: null, srcType: null, srcBlob: null, pdf: null, pageCount: 1, curPage: 0,
-  imageBase: null, cache: new Map(), base: null, pageTok: 0,
+  sources: [], order: [], curPage: 0, showTable: true,
+  cache: new Map(), base: null, pageTok: 0,
   pages: {}, common: C.defaultCommon(), nextNum: 1,
   sel: null, selArrow: 0,
   view: { z: 1, tx: 0, ty: 0 },
@@ -23,6 +23,8 @@ const S = {
   drag: null, pointers: new Map(), gesture: null, ghost: null, lastTap: null, lp: null, menuAt: 0,
   touch: false, editing: null, rowLP: null, savedBackup: false,
 };
+const pageCount = () => S.order.length;
+const firstName = () => (S.sources[0] ? S.sources[0].name : null);
 const SORT_MARK = { 0: "▲▼", 1: "▲", 2: "▼" };
 const TIP_KEY = { tip: "tip", shaft: "shaft" };
 
@@ -141,15 +143,17 @@ function curAnn() {
   const l = anns();
   return S.sel >= 0 && S.sel < l.length ? l[S.sel] : null;
 }
-const snapshot = () => C.clone({ pages: S.pages, common: S.common, nextNum: S.nextNum });
+const snapshot = () => C.clone({ pages: S.pages, common: S.common, nextNum: S.nextNum, order: S.order });
 function restore(snap) {
   const s = C.clone(snap);
-  S.pages = s.pages; S.common = s.common; S.nextNum = s.nextNum;
+  const orderChanged = JSON.stringify(s.order) !== JSON.stringify(S.order);
+  S.pages = s.pages; S.common = s.common; S.nextNum = s.nextNum; S.order = s.order;
   $("#vNext").value = String(S.nextNum);
   S.sel = null; S.selArrow = 0;
   loadCommonToUI();
   refreshTable();
   requestDraw();
+  if (orderChanged && S.base) goPage(Math.min(S.curPage, pageCount() - 1)); // 追加・入れ替えを取り消したときは、表示も合わせる
 }
 function pushUndo() {
   S.undo.push(snapshot());
@@ -175,7 +179,7 @@ function setDirty(v) {
   if (v) scheduleAutosave();
 }
 function updateTitle() {
-  const name = S.annotName || S.srcName || "";
+  const name = S.annotName || firstName() || "";
   document.title = `${S.dirty ? "*" : ""}${name || "(未選択)"} - ${APP}`;
   $("#btnUndo").disabled = !S.undo.length;
   $("#btnRedo").disabled = !S.redo.length;
@@ -247,14 +251,17 @@ function resize() {
 }
 const stageSize = () => ({ w: $("#stage").clientWidth, h: $("#stage").clientHeight });
 
-function fit() {
-  if (!S.base) return;
+function fitParams() {
+  if (!S.base) return null;
   const { w, h } = stageSize();
   const [x0, y0, x1, y1] = C.contentRect(S.base.W, S.base.H, S.paper);
   const z = Math.max(0.01, Math.min(w / (x1 - x0), h / (y1 - y0)) * 0.95);
-  S.view.z = z;
-  S.view.tx = (w - (x1 - x0) * z) / 2 - x0 * z;
-  S.view.ty = (h - (y1 - y0) * z) / 2 - y0 * z;
+  return { z, tx: (w - (x1 - x0) * z) / 2 - x0 * z, ty: (h - (y1 - y0) * z) / 2 - y0 * z };
+}
+function fit() {
+  const f = fitParams();
+  if (!f) return;
+  S.view.z = f.z; S.view.tx = f.tx; S.view.ty = f.ty;
   requestDraw();
 }
 function zoomAt(pt, z) {
@@ -328,40 +335,60 @@ function pickFile(input) {
   });
 }
 
-async function loadSource(file) {
+const DRAW_EXT = ["pdf", "png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff"];
+const isAnnotFile = (f) => ["annot", "json"].includes(IO.extOf(f.name));
+const isDrawingFile = (f) => DRAW_EXT.includes(IO.extOf(f.name)) || f.type === "application/pdf" || String(f.type || "").startsWith("image/");
+
+/** 図面ファイル1つを読み込んで、1つの「図面」(sources の要素)にする */
+async function readSource(file) {
   const ext = IO.extOf(file.name);
-  S.cache.clear();
   if (ext === "pdf" || file.type === "application/pdf") {
     const doc = await IO.openPdf(file);
-    if (S.pdf && S.pdf.destroy) S.pdf.destroy();
-    S.pdf = doc;
-    S.pageCount = doc.numPages;
-    S.srcType = "pdf";
-    S.imageBase = null;
-  } else {
-    const base = await IO.openImage(file);
-    if (S.pdf && S.pdf.destroy) S.pdf.destroy();
-    S.pdf = null;
-    S.imageBase = base;
-    S.pageCount = 1;
-    S.srcType = "image";
+    return { name: file.name, type: "pdf", blob: file, pdf: doc, imageBase: null, pageCount: doc.numPages };
   }
-  S.srcName = file.name;
-  S.srcBlob = file;
+  const base = await IO.openImage(file);
+  return { name: file.name, type: "image", blob: file, pdf: null, imageBase: base, pageCount: 1 };
 }
 
-async function getBase(page) {
-  if (S.srcType === "image") return S.imageBase;
-  if (S.cache.has(page)) return S.cache.get(page);
-  const b = await IO.renderPdfPage(S.pdf, page);
-  S.cache.set(page, b);
+async function readSources(files) {
+  const out = [];
+  try {
+    for (const f of files) {
+      try { out.push(await readSource(f)); } catch (e) { throw new Error(`${f.name}: ${e && e.message ? e.message : e}`); }
+    }
+  } catch (e) { closeSources(out); throw e; }
+  return out;
+}
+
+function closeSources(list) {
+  for (const s of list) if (s.pdf && s.pdf.destroy) { try { s.pdf.destroy(); } catch (e) { /* 無視 */ } }
+}
+
+const naturalEntries = (idx, count) => Array.from({ length: count }, (_, p) => ({ s: idx, p }));
+
+/** 図面を全部入れ替える(開き直し)。order を省くと、頭から全ページの並びになる */
+function useSources(srcs, order = null) {
+  closeSources(S.sources);
+  S.sources = srcs;
+  S.order = order || srcs.flatMap((s, i) => naturalEntries(i, s.pageCount));
+  S.cache.clear();
+}
+
+async function getBase(g) {
+  const e = S.order[g];
+  const src = S.sources[e.s];
+  if (src.type === "image") return src.imageBase;
+  const key = `${e.s}:${e.p}`;
+  if (S.cache.has(key)) return S.cache.get(key);
+  const b = await IO.renderPdfPage(src.pdf, e.p);
+  S.cache.set(key, b);
   while (S.cache.size > 2) S.cache.delete(S.cache.keys().next().value);
   return b;
 }
 
 async function goPage(n) {
   const tok = ++S.pageTok;
-  n = Math.max(0, Math.min(S.pageCount - 1, n));
+  n = Math.max(0, Math.min(pageCount() - 1, n));
   status("読み込み中…");
   let base;
   try { base = await getBase(n); } catch (e) { await alertBox("ページを表示できませんでした。\n" + e.message); return; }
@@ -369,13 +396,16 @@ async function goPage(n) {
   S.curPage = n;
   S.base = base;
   S.sel = null; S.selArrow = 0;
-  $("#pageLabel").textContent = `${n + 1} / ${S.pageCount}`;
+  $("#pageLabel").textContent = `${n + 1} / ${pageCount()}`;
   $("#empty").hidden = true;
   resize();
   fit();
   refreshTable();
   updateTitle();
-  let msg = `${S.srcName}  (${base.W} × ${base.H} px)`;
+  const e = S.order[n], src = S.sources[e.s];
+  let msg = src.name;
+  if (src.pageCount > 1) msg += ` (${e.p + 1}/${src.pageCount}ページ)`;
+  msg += `  (${base.W} × ${base.H} px)`;
   if (base.k < 1) msg += `  ※大きいため、表示用の画像は ${Math.round(base.k * 100)}% に縮小しています(座標は元の大きさのまま)`;
   status(msg);
 }
@@ -388,16 +418,27 @@ function autoDefaults(base) {
   loadCommonToUI();
 }
 
-async function openDrawing() {
-  const files = await pickFile($("#fileDrawing"));
+/** 「開く」: 図面(PDF・画像)も編集ファイル(.annot)も、ここから開く */
+async function openFiles() {
+  const files = await pickFile($("#fileOpen"));
   if (!files.length) return;
   if (!(await confirmDiscard())) return;
-  await newDrawing(files[0]);
+  await openPicked(files);
 }
 
-async function newDrawing(file) {
+async function openPicked(files) {
+  if (files.some(isAnnotFile)) { await openAnnotFiles(files); return; }
+  const drawings = files.filter(isDrawingFile);
+  if (!drawings.length) { await alertBox("図面(PDF・画像)か、編集ファイル(.annot)を選んでください。"); return; }
+  await newDrawing(drawings);
+}
+
+async function newDrawing(files) {
+  files = [].concat(files);
   status("読み込み中…");
-  try { await loadSource(file); } catch (e) { await alertBox("図面を開けませんでした。\n" + (e && e.message ? e.message : e)); return false; }
+  let srcs;
+  try { srcs = await readSources(files); } catch (e) { await alertBox("図面を開けませんでした。\n" + (e && e.message ? e.message : e)); return false; }
+  useSources(srcs);
   S.pages = {}; S.annotName = null; S.undo = []; S.redo = [];
   setNext(1);
   S.common = C.defaultCommon();
@@ -408,27 +449,58 @@ async function newDrawing(file) {
   return true;
 }
 
+/** 「追加」: 開いている作業の最後のページの後ろに、図面(PDF・画像)を足す。編集ファイルは足せない */
+async function addFiles() {
+  const files = await pickFile($("#fileOpen"));
+  if (!files.length) return;
+  if (!S.base) { await openPicked(files); return; }
+  const drawings = files.filter((f) => !isAnnotFile(f) && isDrawingFile(f));
+  const skipped = files.length - drawings.length;
+  if (!drawings.length) { await alertBox("追加できるのは図面(PDF・画像)です。編集ファイル(.annot)は追加できません。"); return; }
+  status("読み込み中…");
+  let srcs;
+  try { srcs = await readSources(drawings); } catch (e) { await alertBox("図面を追加できませんでした。\n" + (e && e.message ? e.message : e)); return; }
+  pushUndo();
+  const first = pageCount();
+  for (const s of srcs) {
+    const i = S.sources.length;
+    S.sources.push(s);
+    S.order.push(...naturalEntries(i, s.pageCount));
+  }
+  const added = pageCount() - first;
+  await goPage(first);
+  saveBlobBackup();
+  status(`${added}ページを最後に追加しました(全 ${pageCount()} ページ)` + (skipped ? `  ※図面以外の ${skipped} 件は追加していません` : ""));
+}
+
 // ------------------------------------------------------ 編集ファイル ---
+/** 保存する図面の一覧と並び。いま使っている図面だけを、使い始めた順に並べ直す */
+function layoutForSave() {
+  const map = new Map(), sources = [];
+  const order = S.order.map((e) => {
+    if (!map.has(e.s)) { map.set(e.s, sources.length); sources.push(S.sources[e.s]); }
+    return [map.get(e.s), e.p];
+  });
+  return { sources, order };
+}
+
 function annotData() {
-  return C.buildAnnot({ srcName: S.srcName, srcType: S.srcType, curPage: S.curPage, common: S.common, nextNum: S.nextNum, paper: S.paper, pages: S.pages });
+  const { sources, order } = layoutForSave();
+  return C.buildAnnot({
+    sources: sources.map((s) => ({ name: s.name, type: s.type, pageCount: s.pageCount })), order,
+    curPage: S.curPage, common: S.common, nextNum: S.nextNum, paper: S.paper, pages: S.pages,
+  });
 }
 
 async function saveAnnot() {
   if (!S.base) { await alertBox("先に図面を開いてください。"); return false; }
-  const name = S.annotName || IO.stemOf(S.srcName) + ".annot";
+  const name = S.annotName || IO.stemOf(firstName()) + ".annot";
   const blob = new Blob([JSON.stringify(annotData(), null, 1)], { type: "application/octet-stream" });
   IO.download(blob, name);
   S.annotName = name;
   setDirty(false);
   status(`編集ファイルを書き出しました: ${name}(iPadでは「ファイル」アプリのダウンロード先に入ります)`);
   return true;
-}
-
-async function openAnnot() {
-  const files = await pickFile($("#fileAnnot"));
-  if (!files.length) return;
-  if (!(await confirmDiscard())) return;
-  await openAnnotFiles(files);
 }
 
 async function openAnnotFiles(files) {
@@ -438,32 +510,62 @@ async function openAnnotFiles(files) {
     data = JSON.parse(await annotFile.text());
     if (!data || typeof data !== "object" || !data.pages) throw new Error("編集ファイルの形式ではありません");
   } catch (e) { await alertBox("読み込めませんでした。\n" + e.message); return; }
-  const src = data.source || {};
-  const want = IO.baseName(src.rel || src.path || "");
-  let drawing = files.find((f) => f !== annotFile);
-  if (!drawing) {
-    drawing = await askDrawing(want);
-    if (!drawing) return;
-  }
+  const infos = annotSources(data);
+  const pool = files.filter((f) => f !== annotFile && isDrawingFile(f));
+  const picked = await resolveSources(infos, pool);
+  if (!picked) return;
   status("読み込み中…");
-  try { await loadSource(drawing); } catch (e) { await alertBox("図面を開けませんでした。\n" + (e && e.message ? e.message : e)); return; }
+  let srcs;
+  try { srcs = await readSources(picked); } catch (e) { await alertBox("図面を開けませんでした。\n" + (e && e.message ? e.message : e)); return; }
+  const order = C.validPageOrder(data.page_order, srcs.map((s) => s.pageCount));
+  useSources(srcs, order ? order.map(([s, p]) => ({ s, p })) : null);
   applyAnnot(data, annotFile.name);
   await goPage(parseInt(data.current_page, 10) || 0);
   setDirty(false);
   saveBlobBackup();
-  if (want && want !== drawing.name) status(`※編集ファイルの元の図面は「${want}」ですが、「${drawing.name}」を使っています`);
+  const renamed = picked.map((f, i) => [wantName(infos[i]), f.name]).filter(([w, n]) => w && w !== n);
+  if (renamed.length) status(`※編集ファイルの元の図面は「${renamed[0][0]}」ですが、「${renamed[0][1]}」を使っています`);
+}
+
+/** 編集ファイルが使う図面の一覧(version 2 は1つだけ、version 3 は sources) */
+const annotSources = (data) => (Array.isArray(data.sources) && data.sources.length ? data.sources : [data.source || {}]);
+const wantName = (si) => IO.baseName((si && (si.rel || si.path)) || "");
+
+/** 編集ファイルが使う図面を、選ばれたファイル(pool)から名前で探す。足りなければ選んでもらう。取り消されたら null */
+async function resolveSources(infos, pool) {
+  const wants = infos.map(wantName);
+  const resolved = infos.map(() => null);
+  const assign = () => {
+    wants.forEach((w, i) => {
+      if (resolved[i]) return;
+      const j = pool.findIndex((f) => f.name === w);
+      if (j >= 0) resolved[i] = pool.splice(j, 1)[0];
+    });
+    const un = resolved.map((r, i) => (r ? -1 : i)).filter((i) => i >= 0);
+    if (un.length && pool.length === un.length) un.forEach((i) => { resolved[i] = pool.shift(); }); // 名前が違っても、数がぴったりなら順に使う
+  };
+  assign();
+  while (resolved.some((r) => !r)) {
+    const missing = wants.filter((w, i) => !resolved[i]);
+    const got = await askDrawings(missing);
+    if (!got) return null;
+    pool.push(...got.filter(isDrawingFile));
+    assign();
+  }
+  return resolved;
 }
 
 /** 編集ファイルと一緒に選ばれなかった図面を、選んでもらう(ボタンを押した操作の中でファイル選択を開く) */
-function askDrawing(want) {
+function askDrawings(wants) {
+  const list = wants.filter(Boolean).map((w) => "・" + w).join("\n");
   return new Promise((resolve) => {
     modal({
       title: "元の図面を選んでください",
-      message: want ? `この編集ファイルの図面は「${want}」です。\n同じ図面ファイルを選んでください。` : "この編集ファイルに合う図面(PDF・画像)を選んでください。",
+      message: list ? `この編集ファイルの図面は次のとおりです。\n${list}\n同じ図面ファイルを選んでください(複数選べます)。` : "この編集ファイルに合う図面(PDF・画像)を選んでください。",
       buttons: [
         { label: "図面を選ぶ", primary: true, keepOpen: true, onClick: async () => {
-          const f = await pickFile($("#fileDrawing"));
-          if (f.length) { $("#modalBack").hidden = true; resolve(f[0]); }
+          const f = await pickFile($("#fileOpen"));
+          if (f.length) { $("#modalBack").hidden = true; resolve(f); }
         } },
         { label: "キャンセル", value: null },
       ],
@@ -493,22 +595,26 @@ function scheduleAutosave() {
   autosaveTimer = setTimeout(async () => {
     if (!S.base) return;
     try {
-      await IO.idbSet("meta", { annot: annotData(), annotName: S.annotName, srcName: S.srcName, srcType: S.srcType, savedAt: Date.now() });
+      await IO.idbSet("meta", { annot: annotData(), annotName: S.annotName, savedAt: Date.now() });
       S.savedBackup = true;
     } catch (e) { /* 保存できない環境(プライベートモードなど)では何もしない */ }
   }, 1500);
 }
 async function saveBlobBackup() {
-  try { await IO.idbSet("blob", S.srcBlob); } catch (e) { /* 同上 */ }
+  try { await IO.idbSet("blobs", S.sources.map((s) => ({ name: s.name, blob: s.blob }))); } catch (e) { /* 同上 */ }
   scheduleAutosave();
 }
 async function checkBackup() {
   try {
     const meta = await IO.idbGet("meta");
-    const blob = await IO.idbGet("blob");
-    if (meta && blob) {
+    let blobs = await IO.idbGet("blobs");
+    if (!blobs) { // 図面が1つだった頃の保存形式
+      const one = await IO.idbGet("blob");
+      if (one && meta && meta.srcName) blobs = [{ name: meta.srcName, blob: one }];
+    }
+    if (meta && blobs && blobs.length) {
       $("#btnRestore2").hidden = false;
-      return { meta, blob };
+      return { meta, blobs };
     }
   } catch (e) { /* なし */ }
   return null;
@@ -517,11 +623,20 @@ async function restoreBackup() {
   const b = await checkBackup();
   if (!b) { await alertBox("復元できる作業が見つかりません。"); return; }
   if (!(await confirmDiscard())) return;
-  const file = new File([b.blob], b.meta.srcName, { type: b.blob.type });
+  const data = b.meta.annot;
+  const pool = b.blobs.map((x) => new File([x.blob], x.name, { type: x.blob.type }));
+  const picked = annotSources(data).map((si) => {
+    const j = pool.findIndex((f) => f.name === wantName(si));
+    return j >= 0 ? pool.splice(j, 1)[0] : null;
+  });
+  if (picked.some((f) => !f)) { await alertBox("一時保存した図面が見つかりません。"); return; }
   status("読み込み中…");
-  try { await loadSource(file); } catch (e) { await alertBox("図面を開けませんでした。\n" + e.message); return; }
-  applyAnnot(b.meta.annot, b.meta.annotName);
-  await goPage(parseInt(b.meta.annot.current_page, 10) || 0);
+  let srcs;
+  try { srcs = await readSources(picked); } catch (e) { await alertBox("図面を開けませんでした。\n" + e.message); return; }
+  const order = C.validPageOrder(data.page_order, srcs.map((s) => s.pageCount));
+  useSources(srcs, order ? order.map(([s, p]) => ({ s, p })) : null);
+  applyAnnot(data, b.meta.annotName);
+  await goPage(parseInt(data.current_page, 10) || 0);
   setDirty(true);
   status("前回の作業を復元しました(まだファイルには保存していません。「保存」で書き出してください)");
 }
@@ -561,8 +676,8 @@ async function exportPng(share) {
   status("書き出し中…");
   try {
     const r = await renderExport(S.curPage);
-    let stem = IO.stemOf(S.srcName);
-    if (S.pageCount > 1) stem += `_p${S.curPage + 1}`;
+    let stem = IO.stemOf(firstName());
+    if (pageCount() > 1) stem += `_p${S.curPage + 1}`;
     const res = await IO.deliver(new Blob([r.bytes], { type: "image/png" }), `${stem}_注記.png`, { share });
     status(res === "cancel" ? "書き出しをやめました" : `書き出しました: ${stem}_注記.png (${r.w}×${r.h} px)${exportNote(r.plan)}`);
   } catch (e) { await alertBox("書き出せませんでした。\n" + e.message); }
@@ -573,15 +688,16 @@ async function exportAll() {
   try {
     const files = [];
     let note = "";
-    const stem = IO.stemOf(S.srcName);
-    for (let p = 0; p < S.pageCount; p++) {
-      status(`書き出し中… ${p + 1} / ${S.pageCount}`);
+    const stem = IO.stemOf(firstName());
+    const total = pageCount();
+    for (let p = 0; p < total; p++) {
+      status(`書き出し中… ${p + 1} / ${total}`);
       const r = await renderExport(p);
       files.push({ name: `${stem}_p${p + 1}_注記.png`, bytes: r.bytes });
       note = exportNote(r.plan) || note;
     }
     const res = await IO.deliver(IO.buildZip(files), `${stem}_注記.zip`, { share: IO.isTouchDevice() });
-    status(res === "cancel" ? "書き出しをやめました" : `${S.pageCount}ページをZIPで書き出しました${note}`);
+    status(res === "cancel" ? "書き出しをやめました" : `${total}ページをZIPで書き出しました${note}`);
   } catch (e) { await alertBox("書き出せませんでした。\n" + e.message); }
 }
 
@@ -1262,13 +1378,141 @@ function rowMenu(tr, x, y) {
   (mq.addEventListener ? mq.addEventListener("change", reset) : mq.addListener(reset));
 })();
 
+// ------------------------------------------------------ 表の表示・非表示 ---
+function setTableVisible(v) {
+  const before = stageSize();
+  const f = fitParams();
+  const wasFit = !!f && Math.abs(S.view.z - f.z) < 1e-6 && Math.abs(S.view.tx - f.tx) < 0.5 && Math.abs(S.view.ty - f.ty) < 0.5;
+  S.showTable = v;
+  $("#panel").hidden = !v;
+  $("#sash").hidden = !v;
+  const b = $("#btnTbl");
+  b.classList.toggle("on", v);
+  b.setAttribute("aria-checked", String(v));
+  $("#btnTbl .swtxt").textContent = v ? "ON" : "OFF";
+  cancelEdit();
+  resize();
+  if (S.base) {
+    if (wasFit) fit(); // 全体表示のままなら、広がった分に合わせて全体を表示し直す
+    else { // 拡大・移動中なら、いま見ている中心を保つ
+      const now = stageSize();
+      S.view.tx += (now.w - before.w) / 2;
+      S.view.ty += (now.h - before.h) / 2;
+      requestDraw();
+    }
+  }
+  status(v ? "表を表示しました" : "表を隠しました(図面が広く表示されます。「表の表示」で戻せます)");
+}
+
+// ------------------------------------------------------ ページの入れ替え ---
+/** work[i] = 入れ替え後の i 番目に来る、元のページ(0始まり)。図面・注記を新しい並びに直す */
+async function applyPageOrder(work) {
+  if (work.length !== pageCount() || work.every((o, i) => o === i)) return false;
+  pushUndo();
+  const pages = {};
+  work.forEach((o, i) => { if (S.pages[o]) pages[i] = S.pages[o]; });
+  const cur = S.curPage;
+  S.order = work.map((o) => S.order[o]);
+  S.pages = pages;
+  await goPage(work.indexOf(cur));
+  return true;
+}
+
+function reorderPages() {
+  if (!S.base || pageCount() < 2) { alertBox("入れ替えるページが2ページ以上必要です。"); return Promise.resolve(); }
+  const n = pageCount();
+  const work = Array.from({ length: n }, (_, i) => i);
+  const back = $("#modalBack"), box = $("#modal");
+  box.innerHTML = "";
+  box.classList.add("wide");
+  const h = document.createElement("h3");
+  h.textContent = "ページの入れ替え";
+  const p = document.createElement("p");
+  p.textContent = "▲▼ か、左の ≡ をドラッグして並べ替えます。注記は、ページといっしょに動きます。";
+  const list = document.createElement("div");
+  list.className = "rlist";
+  const btns = document.createElement("div");
+  btns.className = "btns row";
+  box.append(h, p, list, btns);
+
+  const rows = new Map(); // 元のページ → 行の要素
+  let alive = true, dragOrig = null;
+  const counts = (o) => (S.pages[o] || []).filter(C.isPlaced).length;
+  const renderList = () => {
+    work.forEach((o, i) => {
+      const r = rows.get(o);
+      r.querySelector(".rno").textContent = String(i + 1);
+      r.querySelector(".rup").disabled = i === 0;
+      r.querySelector(".rdn").disabled = i === n - 1;
+      r.classList.toggle("moved", o !== i);
+      list.appendChild(r);
+    });
+  };
+  const move = (o, to) => {
+    const from = work.indexOf(o);
+    to = Math.max(0, Math.min(n - 1, to));
+    if (from === to) return;
+    work.splice(from, 1);
+    work.splice(to, 0, o);
+    renderList();
+  };
+  for (let o = 0; o < n; o++) {
+    const e = S.order[o], src = S.sources[e.s];
+    const r = document.createElement("div");
+    r.className = "rrow";
+    const nm = src.pageCount > 1 ? `${src.name} (${e.p + 1}/${src.pageCount})` : src.name;
+    r.innerHTML = `<span class="rgrip" title="ドラッグで移動">≡</span><span class="rno"></span><span class="rth"></span>` +
+      `<span class="rinfo"><span class="rname"></span><span class="rcnt">注記 ${counts(o)} 件</span></span>` +
+      `<button class="btn sq rup" aria-label="上へ">▲</button><button class="btn sq rdn" aria-label="下へ">▼</button>`;
+    r.querySelector(".rname").textContent = nm;
+    r.querySelector(".rup").onclick = () => move(o, work.indexOf(o) - 1);
+    r.querySelector(".rdn").onclick = () => move(o, work.indexOf(o) + 1);
+    const grip = r.querySelector(".rgrip");
+    grip.onpointerdown = (ev) => { ev.preventDefault(); grip.setPointerCapture(ev.pointerId); dragOrig = o; r.classList.add("drag"); };
+    grip.onpointermove = (ev) => {
+      if (dragOrig !== o) return;
+      const els = [...list.children];
+      let to = els.findIndex((el) => { const b = el.getBoundingClientRect(); return ev.clientY < b.top + b.height / 2; });
+      if (to < 0) to = els.length;
+      const from = work.indexOf(o);
+      move(o, to > from ? to - 1 : to);
+    };
+    const end = () => { if (dragOrig === o) { dragOrig = null; r.classList.remove("drag"); } };
+    grip.onpointerup = end; grip.onpointercancel = end;
+    rows.set(o, r);
+  }
+  renderList();
+
+  const close = () => { alive = false; back.hidden = true; box.classList.remove("wide"); };
+  return new Promise((resolve) => {
+    const mk = (label, primary, fn) => {
+      const b = document.createElement("button");
+      b.className = "btn" + (primary ? " primary" : "");
+      b.textContent = label;
+      b.onclick = fn;
+      btns.appendChild(b);
+    };
+    mk("元の並びに戻す", false, () => { work.sort((a, b) => a - b); renderList(); });
+    mk("キャンセル", false, () => { close(); resolve(false); });
+    mk("この並びにする", true, async () => { close(); resolve(await applyPageOrder(work)); });
+    back.hidden = false;
+    // 小さな画像は、表示してから順に作る(PDFが多くても、画面はすぐ開く)
+    (async () => {
+      for (let o = 0; o < n && alive; o++) {
+        try {
+          const e = S.order[o], src = S.sources[e.s];
+          const c = src.type === "image" ? IO.imageThumb(src.imageBase.raster) : await IO.renderPdfThumb(src.pdf, e.p);
+          if (alive) rows.get(o).querySelector(".rth").replaceChildren(c);
+        } catch (err) { /* 画像がなくても入れ替えはできる */ }
+      }
+    })();
+  });
+}
+
 // ----------------------------------------------------------- ボタン類 ---
-function openMenuItems() {
+function editMenuItems() {
   return [
-    { label: "図面を開く(PDF・画像)…", action: openDrawing },
-    { label: "編集ファイル(.annot)を開く…", action: openAnnot },
-    "-",
-    { label: "前回の作業を復元", action: restoreBackup, disabled: $("#btnRestore2").hidden },
+    { label: "ページの入れ替え…", action: reorderPages, disabled: !S.base || pageCount() < 2 },
   ];
 }
 function exportMenuItems() {
@@ -1289,12 +1533,15 @@ function setPlaceMode(v) {
 }
 
 function changePage(d) {
-  if (S.base && S.curPage + d >= 0 && S.curPage + d < S.pageCount) goPage(S.curPage + d);
+  if (S.base && S.curPage + d >= 0 && S.curPage + d < pageCount()) goPage(S.curPage + d);
 }
 
 function bind() {
-  $("#btnOpen").onclick = (e) => showMenuBelow(e.currentTarget, openMenuItems());
-  $("#btnOpen2").onclick = () => openDrawing();
+  $("#btnOpen").onclick = () => openFiles();
+  $("#btnAdd").onclick = () => addFiles();
+  $("#btnEdit").onclick = (e) => showMenuBelow(e.currentTarget, editMenuItems());
+  $("#btnTbl").onclick = () => setTableVisible(!S.showTable);
+  $("#btnOpen2").onclick = () => openFiles();
   $("#btnRestore2").onclick = () => restoreBackup();
   $("#btnSave").onclick = () => saveAnnot();
   $("#btnExport").onclick = (e) => {
@@ -1338,7 +1585,7 @@ function bind() {
       else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); redo(); }
       else if (k === "s") { e.preventDefault(); saveAnnot(); }
       else if (k === "e") { e.preventDefault(); exportPng(false); }
-      else if (k === "o") { e.preventDefault(); e.shiftKey ? openAnnot() : openDrawing(); }
+      else if (k === "o") { e.preventDefault(); e.shiftKey ? addFiles() : openFiles(); }
       return;
     }
     if (typing) return;
@@ -1357,7 +1604,7 @@ function init() {
   refreshTable();
   updateTitle();
   resize();
-  checkBackup().then((b) => { if (b) status("前回の作業を復元できます(「開く」→「前回の作業を復元」)"); });
+  checkBackup().then((b) => { if (b) status("前回の作業を復元できます(下の「前回の作業を復元」ボタン)"); });
   if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
   }
@@ -1367,4 +1614,4 @@ window.addEventListener("unhandledrejection", (e) => status("エラー: " + ((e.
 init();
 
 // テストやデバッグ用(通常の操作には使いません)
-window.__npa = { S, C, IO, newDrawing, openAnnotFiles, goPage, fit, draw, renderExport, annotData, placeAt, select, refreshTable, loadSource };
+window.__npa = { S, C, IO, newDrawing, openAnnotFiles, openPicked, readSources, goPage, fit, draw, renderExport, annotData, placeAt, select, refreshTable, setTableVisible, applyPageOrder, pageCount };

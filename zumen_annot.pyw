@@ -57,6 +57,11 @@ COLOR_FIELDS = [("c_text", "数字"), ("c_circle", "〇の枠"), ("c_arrow", "�
 COMMON_KEYS = ("font_size", "length", "width", "c_text", "c_circle", "c_arrow")
 ARROW_KEYS = ("length", "width", "c_arrow")  # 2本目以降の矢印が、共通ONのとき共通値に従う項目
 IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif", ".webp")
+DRAW_EXTS = (".pdf",) + IMG_EXT
+_DRAW_PAT = " ".join("*" + e for e in DRAW_EXTS)
+FILETYPES_DRAW = [("図面(PDF・画像)", _DRAW_PAT), ("すべて", "*.*")]
+FILETYPES_OPEN = [("図面・編集ファイル", _DRAW_PAT + " *.annot"), ("図面(PDF・画像)", _DRAW_PAT),
+                  ("編集ファイル", "*.annot"), ("すべて", "*.*")]
 
 # 用紙(縦向きの mm 寸法: 幅, 高さ。B判はJIS)
 NO_PAPER = "図面サイズのまま"
@@ -183,6 +188,43 @@ def migrate_loaded(data):
                 for k in ARROW_KEYS:
                     e.setdefault(k, common[k])
     return pages, common
+
+
+def is_drawing_path(p):
+    return str(p).lower().endswith(DRAW_EXTS)
+
+
+def valid_page_order(raw, page_counts):
+    """.annot の page_order を検査する。範囲外や形の違うものは捨て、使えなければ None(呼び出し側で「頭から全ページ」にする)。
+    page_counts は図面ごとのページ数。"""
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for e in raw:
+        if not isinstance(e, (list, tuple)) or len(e) < 2:
+            continue
+        try:
+            si, pi = int(e[0]), int(e[1])
+        except (TypeError, ValueError):
+            continue
+        if 0 <= si < len(page_counts) and 0 <= pi < page_counts[si]:
+            out.append([si, pi])
+    return out or None
+
+
+def annot_layout(sources, order):
+    """保存する図面の一覧と並びを返す。いま使っている図面だけを、使い始めた順に並べ直す。
+    戻り値: (使う図面の番号の並び, 新しい並び [[図面の番号, ページ], ...], 「1つの図面を頭から全ページそのまま」か)。
+    そのままなら version 2(旧版と同じ形)、それ以外は version 3 で保存する。"""
+    remap, used, out = {}, [], []
+    for si, pi in order:
+        if si not in remap:
+            remap[si] = len(used)
+            used.append(si)
+        out.append([remap[si], pi])
+    natural = (len(used) == 1 and len(out) == sources[used[0]]["page_count"]
+               and all(a == 0 and b == i for i, (a, b) in enumerate(out)))
+    return used, out, natural
 
 
 def color_name(hx):
@@ -594,10 +636,11 @@ class App:
         self.root.geometry("1540x860")
         self.root.report_callback_exception = self.on_exception
 
-        self.src_path = None
-        self.src_type = None
-        self.pdf = None
+        self.sources = []  # 開いている図面: {"path", "type", "pdf", "img", "page_count"}
+        self.order = []  # ページの並び: [図面の番号, その図面のページ(0始まり)]
+        self.src_path = None  # 先頭の図面(タイトル・保存名の既定に使う)
         self.page_count = 1
+        self.show_table = True
         self.cur_page = 0
         self.base_img = None
         self.pages = {}
@@ -623,7 +666,7 @@ class App:
         self.place_mode = tk.BooleanVar(value=True)
         self.place_mode.trace_add("write", lambda *a: self.remove_ghost() if not self.place_mode.get() else None)
         self.v_page = tk.StringVar(value="- / -")
-        self.v_status = tk.StringVar(value="図面を開いてください(ファイル > 図面を開く)")
+        self.v_status = tk.StringVar(value="図面か編集ファイルを開いてください(ファイル > 開く)")
         self.v_paper = tk.StringVar(value=NO_PAPER)
         self.v_orient = tk.StringVar(value="自動")
         self.v_margin = tk.StringVar(value="10")
@@ -641,8 +684,8 @@ class App:
         r = self.root
         menu = tk.Menu(r)
         fm = tk.Menu(menu, tearoff=0)
-        fm.add_command(label="図面を開く(PDF・画像)...", accelerator="Ctrl+O", command=self.open_drawing)
-        fm.add_command(label="編集ファイル(.annot)を開く...", accelerator="Ctrl+Shift+O", command=self.open_annot)
+        fm.add_command(label="開く(図面・編集ファイル)...", accelerator="Ctrl+O", command=self.open_files)
+        fm.add_command(label="図面を追加(最後に追加)...", accelerator="Ctrl+Shift+O", command=self.add_files)
         fm.add_separator()
         fm.add_command(label="保存", accelerator="Ctrl+S", command=self.save)
         fm.add_command(label="名前を付けて保存...", command=self.save_as)
@@ -655,6 +698,8 @@ class App:
         em = tk.Menu(menu, tearoff=0)
         em.add_command(label="元に戻す", accelerator="Ctrl+Z", command=self.undo)
         em.add_command(label="やり直し", accelerator="Ctrl+Y", command=self.redo)
+        em.add_separator()
+        em.add_command(label="ページの入れ替え...", command=self.reorder_pages)
         em.add_separator()
         em.add_command(label="選択行の下に行を挿入", command=self.insert_row_below)
         em.add_command(label="選択した注記を削除", accelerator="Delete", command=self.delete_selected)
@@ -673,8 +718,8 @@ class App:
         # --- 上部1段目: ファイル・ページ・表示・用紙
         tb = ttk.Frame(r, padding=(4, 4, 4, 0))
         tb.pack(side="top", fill="x")
-        ttk.Button(tb, text="図面を開く", command=self.open_drawing).pack(side="left", padx=2)
-        ttk.Button(tb, text="編集ファイルを開く", command=self.open_annot).pack(side="left", padx=2)
+        ttk.Button(tb, text="開く", command=self.open_files).pack(side="left", padx=2)
+        ttk.Button(tb, text="追加", command=self.add_files).pack(side="left", padx=2)
         ttk.Button(tb, text="保存", command=self.save).pack(side="left", padx=2)
         ttk.Button(tb, text="PNG書き出し", command=self.export_png).pack(side="left", padx=2)
         ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
@@ -723,6 +768,7 @@ class App:
         ttk.Button(row2, text="更新", command=self.apply_common).pack(side="left", padx=(12, 4))
         self.lbl_pending = ttk.Label(row2, text="", foreground="#D35400")
         self.lbl_pending.pack(side="left")
+        self.build_table_switch(row2)
         ttk.Spinbox(row2, textvariable=self.v_next, from_=0, to=99999, increment=1, width=7).pack(side="right")
         ttk.Label(row2, text="次の番号").pack(side="right", padx=(10, 2))
 
@@ -736,10 +782,12 @@ class App:
         self.panel = panel
         sash = tk.Frame(main, width=6, cursor="sb_h_double_arrow", bg="#c8c8c8")
         sash.pack(side="right", fill="y")
+        self.sash = sash
         sash.bind("<ButtonPress-1>", lambda e: setattr(self, "_sash0", (e.x_root, self.panel.winfo_width())))
         sash.bind("<B1-Motion>", self.on_sash_drag)
         cf = ttk.Frame(main)
         cf.pack(side="left", fill="both", expand=True)
+        self.canvas_frame = cf
         self.canvas = tk.Canvas(cf, bg="#6b6b6b", highlightthickness=0)
         vs = ttk.Scrollbar(cf, orient="vertical", command=self.canvas.yview)
         hs = ttk.Scrollbar(cf, orient="horizontal", command=self.canvas.xview)
@@ -770,8 +818,8 @@ class App:
         r.bind("<Control-z>", lambda e: self.undo())
         r.bind("<Control-y>", lambda e: self.redo())
         r.bind("<Control-s>", lambda e: self.save())
-        r.bind("<Control-o>", lambda e: self.open_drawing())
-        r.bind("<Control-O>", lambda e: self.open_annot())
+        r.bind("<Control-o>", lambda e: self.open_files())
+        r.bind("<Control-O>", lambda e: self.add_files())
         r.bind("<Control-e>", lambda e: self.export_png())
         r.bind("<Prior>", lambda e: self.change_page(-1))
         r.bind("<Next>", lambda e: self.change_page(1))
@@ -838,6 +886,183 @@ class App:
             "・番号・角度はいつでもダブルクリックで編集 / 「矢印」列クリックで有無を切替\n"
             "・右クリック: 下に行を挿入(未配置の行。図面をダブルクリックすると配置)")).pack(anchor="w", pady=(6, 0))
 
+    # ---- 表の表示・非表示 -----------------------------------------------
+    def build_table_switch(self, parent):
+        """共通ステータスの行の右端に置く「表の表示」スイッチ(ON=青でつまみが右 / OFF=灰でつまみが左)"""
+        fr = ttk.Frame(parent)
+        fr.pack(side="right", padx=(14, 0))
+        self.sw_label = ttk.Label(fr, text="表の表示", font=("", 9, "bold"))
+        self.sw_label.pack(side="left", padx=(0, 4))
+        bg = ttk.Style().lookup("TFrame", "background") or "#f0f0f0"
+        self.sw_canvas = tk.Canvas(fr, width=38, height=22, highlightthickness=0, bg=bg, cursor="hand2")
+        self.sw_canvas.pack(side="left")
+        self.sw_text = ttk.Label(fr, text="ON", width=4)
+        self.sw_text.pack(side="left", padx=(4, 0))
+        for w in (fr, self.sw_label, self.sw_canvas, self.sw_text):
+            w.bind("<Button-1>", lambda e: self.toggle_table())
+        self.draw_table_switch()
+
+    def draw_table_switch(self):
+        on = self.show_table
+        track, edge, knob = ("#2F7FD8", "#1F5FA8", "#FFFFFF") if on else ("#FFFFFF", "#9A9AA2", "#8A8A92")
+        c = self.sw_canvas
+        c.delete("all")
+        c.create_oval(2, 2, 20, 20, fill=track, outline=edge)
+        c.create_oval(18, 2, 36, 20, fill=track, outline=edge)
+        c.create_rectangle(11, 2, 27, 21, fill=track, outline=track)
+        c.create_line(11, 2, 27, 2, fill=edge)
+        c.create_line(11, 20, 27, 20, fill=edge)
+        kx = 27 if on else 11
+        c.create_oval(kx - 7, 4, kx + 7, 18, fill=knob, outline=knob)
+        self.sw_text.config(text="ON" if on else "OFF", foreground="#1F5FA8" if on else "#777777")
+        self.sw_label.config(foreground="#000000" if on else "#666666")
+
+    def toggle_table(self, v=None):
+        """右の注記一覧(表)を隠す/出す。隠すと図面が横いっぱいに広がる。"""
+        v = (not self.show_table) if v is None else bool(v)
+        if v == self.show_table:
+            return
+        was_fit = False
+        if self.base_img is not None:  # 全体表示のままなら、広がった(狭まった)分に合わせて全体を表示し直す
+            fz = max(0.03, min(self.max_zoom(), self.fit_zoom()))
+            was_fit = abs(self.zoom - fz) < 1e-6
+        self.show_table = v
+        if v:
+            self.panel.pack(side="right", fill="y", before=self.canvas_frame)
+            self.sash.pack(side="right", fill="y", before=self.canvas_frame)
+        else:
+            self.cancel_edit()
+            self.sash.pack_forget()
+            self.panel.pack_forget()
+        self.draw_table_switch()
+        self.root.update_idletasks()
+        if was_fit:
+            self.fit()
+        self.v_status.set("表を表示しました" if v else "表を隠しました(図面が広く表示されます。「表の表示」で戻せます)")
+
+    # ---- ページの入れ替え -----------------------------------------------
+    def apply_page_order(self, work):
+        """work[i] = 入れ替え後の i 番目に来る、元のページ(0始まり)。図面の並びと注記を新しい並びに直す。"""
+        if len(work) != self.page_count or work == list(range(self.page_count)):
+            return False
+        self.push_undo()
+        self.pages = {i: self.pages[o] for i, o in enumerate(work) if o in self.pages}
+        cur = self.cur_page
+        self.order = [self.order[o] for o in work]
+        self.go_page(work.index(cur))
+        return True
+
+    def page_thumb(self, o, box):
+        """入れ替え画面用の、元の o ページの小さな画像"""
+        si, pi = self.order[o]
+        src = self.sources[si]
+        if src["type"] == "pdf":
+            pg = src["pdf"][pi]
+            z = box / max(pg.rect.width, pg.rect.height)
+            pix = pg.get_pixmap(matrix=fitz.Matrix(z, z), alpha=False)
+            im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        else:
+            im = src["img"].copy()
+        im.thumbnail((box, box))
+        return ImageTk.PhotoImage(im)
+
+    def reorder_pages(self):
+        if self.base_img is None or self.page_count < 2:
+            messagebox.showinfo(APP_NAME, "入れ替えるページが2ページ以上必要です。")
+            return
+        n = self.page_count
+        box = 64
+        top = tk.Toplevel(self.root)
+        top.title("ページの入れ替え")
+        top.transient(self.root)
+        top.geometry("600x560")
+        ttk.Label(top, text="行をドラッグするか、「上へ」「下へ」で並べ替えます。注記は、ページといっしょに動きます。").pack(
+            anchor="w", padx=8, pady=(8, 4))
+        ttk.Style().configure("Reorder.Treeview", rowheight=box + 8, font=self.tree_font)
+        tf = ttk.Frame(top)
+        tf.pack(fill="both", expand=True, padx=8)
+        tree = ttk.Treeview(tf, columns=("name", "cnt"), show="tree headings", selectmode="browse", style="Reorder.Treeview")
+        tree.heading("#0", text="ページ")
+        tree.heading("name", text="図面")
+        tree.heading("cnt", text="注記")
+        tree.column("#0", width=150, stretch=False)
+        tree.column("name", width=300)
+        tree.column("cnt", width=70, anchor="center", stretch=False)
+        vs = ttk.Scrollbar(tf, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        thumbs = {}
+        for o in range(n):
+            si, pi = self.order[o]
+            src = self.sources[si]
+            nm = os.path.basename(src["path"])
+            if src["page_count"] > 1:
+                nm += " (%d/%d)" % (pi + 1, src["page_count"])
+            cnt = sum(1 for a in self.pages.get(o, []) if is_placed(a))
+            tree.insert("", "end", iid=str(o), text="  %d" % (o + 1), values=(nm, "%d件" % cnt))
+
+        def relabel():
+            for i, iid in enumerate(tree.get_children()):
+                tree.item(iid, text="  %d%s" % (i + 1, "" if int(iid) == i else "  (移動)"))
+
+        def fill_thumbs(o=0):  # 小さな画像は、画面を開いてから順に作る(PDFが多くても、すぐ開く)
+            if o >= n or not top.winfo_exists():
+                return
+            try:
+                thumbs[o] = self.page_thumb(o, box)
+                tree.item(str(o), image=thumbs[o])
+            except Exception:
+                pass  # 画像がなくても入れ替えはできる
+            top.after(5, lambda: fill_thumbs(o + 1))
+
+        drag = {"iid": None}
+        tree.bind("<ButtonPress-1>", lambda e: drag.update(iid=tree.identify_row(e.y) or None))
+
+        def on_drag(e):
+            tgt = tree.identify_row(e.y)
+            if drag["iid"] and tgt and tgt != drag["iid"]:
+                tree.move(drag["iid"], "", tree.index(tgt))
+                relabel()
+
+        tree.bind("<B1-Motion>", on_drag)
+        tree.bind("<ButtonRelease-1>", lambda e: drag.update(iid=None))
+
+        def shift(d):
+            sel = tree.selection()
+            if not sel:
+                return
+            i = tree.index(sel[0]) + d
+            if 0 <= i < n:
+                tree.move(sel[0], "", i)
+                tree.see(sel[0])
+                relabel()
+
+        def reset():
+            for i in range(n):
+                tree.move(str(i), "", i)
+            relabel()
+
+        def ok():
+            work = [int(i) for i in tree.get_children()]
+            top.destroy()
+            self.apply_page_order(work)
+
+        bf = ttk.Frame(top)
+        bf.pack(fill="x", padx=8, pady=8)
+        ttk.Button(bf, text="上へ", command=lambda: shift(-1)).pack(side="left")
+        ttk.Button(bf, text="下へ", command=lambda: shift(1)).pack(side="left", padx=4)
+        ttk.Button(bf, text="元の並びに戻す", command=reset).pack(side="left", padx=4)
+        ttk.Button(bf, text="この並びにする", command=ok).pack(side="right")
+        ttk.Button(bf, text="キャンセル", command=top.destroy).pack(side="right", padx=4)
+        tree.selection_set("0")
+        top.bind("<Escape>", lambda e: top.destroy())
+        try:
+            top.grab_set()
+        except tk.TclError:
+            pass
+        top.after(30, fill_thumbs)
+
     def show_hints(self):
         messagebox.showinfo(APP_NAME, (
             "・空いている所をダブルクリック: 新しい番号を配置(ダブルクリックのまま押し続けてドラッグで矢印の向き)\n"
@@ -853,7 +1078,10 @@ class App:
             "・表で行を選んで右クリック > 下に行を挿入: 未配置の行ができます。番号を入力して\n"
             "  行を選んだまま図面をダブルクリックすると、その位置に配置されます(番号が空なら自動採番)\n"
             "・Ctrl+ホイール: 拡大縮小 / 右・中ボタンドラッグ: 画面移動 / Delete: 削除 / Esc: 選択解除\n"
-            "・用紙を選ぶと、画面に用紙の枠(実線)と余白の内側(青い破線)を表示し、PNGも用紙サイズで書き出します"))
+            "・用紙を選ぶと、画面に用紙の枠(実線)と余白の内側(青い破線)を表示し、PNGも用紙サイズで書き出します\n"
+            "・「開く」は図面(PDF・画像)も編集ファイルも開けます。「追加」で、開いている作業の最後に図面を足せます\n"
+            "・編集 > ページの入れ替え で、ページの順番を変えられます(注記はページといっしょに動きます)\n"
+            "・共通ステータスの行の右端「表の表示」で、注記一覧の表を隠して図面を広く使えます"))
 
     def on_exception(self, exc, val, tb):
         msg = "".join(traceback.format_exception(exc, val, tb))
@@ -959,16 +1187,21 @@ class App:
         return lst[self.sel] if 0 <= self.sel < len(lst) else None
 
     def snapshot(self):
-        return copy.deepcopy((self.pages, self.common, self.next_num))
+        return copy.deepcopy((self.pages, self.common, self.next_num, self.order))
 
     def restore(self, snap):
-        self.pages, self.common, self.next_num = copy.deepcopy(snap)
+        self.pages, self.common, self.next_num, order = copy.deepcopy(snap)
+        order_changed = order != self.order
+        self.order = order
+        self.page_count = len(order)
         self.v_next.set(str(self.next_num))
         self.sel = None
         self.sel_arrow = 0
         self.load_common_to_ui()
         self.refresh_table()
         self.redraw_annotations()
+        if order_changed and self.base_img is not None:  # 追加・入れ替えを取り消したときは、表示も合わせる
+            self.go_page(min(self.cur_page, self.page_count - 1))
 
     def push_undo(self):
         self.undo_stack.append(self.snapshot())
@@ -1009,56 +1242,120 @@ class App:
             return self.save()
         return True
 
-    def open_drawing(self):
+    def open_files(self):
+        """「開く」: 図面(PDF・画像)も編集ファイル(.annot)も、ここから開く。複数の図面もまとめて選べる。"""
         if not self.confirm_discard():
             return
-        path = filedialog.askopenfilename(
-            title="図面を選択",
-            filetypes=[("図面(PDF・画像)", "*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif *.webp"), ("すべて", "*.*")])
-        if not path:
-            return
-        if self.load_source(path):
-            self.pages = {}
-            self.annot_path = None
-            self.undo_stack.clear()
-            self.redo_stack.clear()
-            self.next_num = 1
-            self.v_next.set("1")
-            self.common = default_common()
-            self.auto_defaults()
-            self.go_page(0)
-            self.set_dirty(False)
+        paths = filedialog.askopenfilenames(title="開く(図面・編集ファイル)", filetypes=FILETYPES_OPEN)
+        if paths:
+            self.open_paths(list(paths))
 
-    def load_source(self, path):
+    def open_paths(self, paths):
+        annots = [p for p in paths if p.lower().endswith(".annot")]
+        if annots:  # 一緒に選ばれた図面は、編集ファイルの図面を探すときの手がかりにする
+            self.load_annot(annots[0], hints=[p for p in paths if p != annots[0]])
+            return
+        drawings = [p for p in paths if is_drawing_path(p)]
+        if not drawings:
+            messagebox.showwarning(APP_NAME, "図面(PDF・画像)か、編集ファイル(.annot)を選んでください。")
+            return
+        self.open_new(drawings)
+
+    def open_new(self, paths):
+        srcs = self.read_sources(paths)
+        if srcs is None:
+            return
+        self.use_sources(srcs)
+        self.pages = {}
+        self.annot_path = None
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.next_num = 1
+        self.v_next.set("1")
+        self.common = default_common()
+        self.auto_defaults()
+        self.go_page(0)
+        self.set_dirty(False)
+
+    def add_files(self):
+        """「追加」: 開いている作業の最後のページの後ろに、図面(PDF・画像)を足す。編集ファイルは足せない。"""
+        if self.base_img is None:
+            self.open_files()
+            return
+        paths = filedialog.askopenfilenames(title="追加する図面を選択", filetypes=FILETYPES_DRAW)
+        if not paths:
+            return
+        drawings = [p for p in paths if is_drawing_path(p)]
+        skipped = len(paths) - len(drawings)
+        if not drawings:
+            messagebox.showwarning(APP_NAME, "追加できるのは図面(PDF・画像)です。編集ファイル(.annot)は追加できません。")
+            return
+        srcs = self.read_sources(drawings)
+        if srcs is None:
+            return
+        self.push_undo()
+        first = len(self.order)
+        for src in srcs:
+            idx = len(self.sources)
+            self.sources.append(src)
+            self.order.extend([idx, p] for p in range(src["page_count"]))
+        self.page_count = len(self.order)
+        self.go_page(first)
+        msg = "%dページを最後に追加しました(全 %dページ)" % (self.page_count - first, self.page_count)
+        if skipped:
+            msg += "  ※図面以外の %d 件は追加していません" % skipped
+        self.v_status.set(msg)
+
+    def read_source(self, path):
+        """図面ファイル1つを読み込んで、1つの「図面」にする。失敗したら理由を表示して None。"""
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext == ".pdf":
                 if fitz is None:
                     messagebox.showerror(APP_NAME, "PDFを開くには PyMuPDF が必要です。\n\npip install pymupdf")
-                    return False
+                    return None
                 doc = fitz.open(path)
-                self.pdf = doc
-                self.page_count = len(doc)
-                self.src_type = "pdf"
-            else:
-                img = Image.open(path)
-                img.load()
-                self.pdf = None
-                self.full_img = img.convert("RGB")
-                self.page_count = 1
-                self.src_type = "image"
+                return {"path": path, "type": "pdf", "pdf": doc, "img": None, "page_count": len(doc)}
+            img = Image.open(path)
+            img.load()
+            return {"path": path, "type": "image", "pdf": None, "img": img.convert("RGB"), "page_count": 1}
         except Exception as e:
-            messagebox.showerror(APP_NAME, "図面を開けませんでした。\n%s" % e)
-            return False
-        self.src_path = path
-        return True
+            messagebox.showerror(APP_NAME, "図面を開けませんでした。\n%s\n%s" % (os.path.basename(path), e))
+            return None
+
+    def read_sources(self, paths):
+        out = []
+        for p in paths:
+            src = self.read_source(p)
+            if src is None:
+                self.close_sources(out)
+                return None
+            out.append(src)
+        return out
+
+    def close_sources(self, srcs):
+        for src in srcs:
+            if src.get("pdf") is not None:
+                try:
+                    src["pdf"].close()
+                except Exception:
+                    pass
+
+    def use_sources(self, srcs, order=None):
+        """図面を全部入れ替える(開き直し)。order を省くと、頭から全ページの並びになる。"""
+        self.close_sources(self.sources)
+        self.sources = srcs
+        self.order = order or [[i, p] for i, src in enumerate(srcs) for p in range(src["page_count"])]
+        self.page_count = len(self.order)
+        self.src_path = srcs[0]["path"] if srcs else None
 
     def get_base(self, page):
-        if self.src_type == "pdf":
-            pg = self.pdf[page]
-            pix = pg.get_pixmap(dpi=PDF_DPI, alpha=False)
+        si, pi = self.order[page]
+        src = self.sources[si]
+        if src["type"] == "pdf":
+            pix = src["pdf"][pi].get_pixmap(dpi=PDF_DPI, alpha=False)
             return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        return self.full_img
+        return src["img"]
 
     def auto_defaults(self):
         base = self.get_base(0)
@@ -1077,7 +1374,12 @@ class App:
         self.fit()
         self.refresh_table()
         self.update_title()
-        self.v_status.set("%s  (%d × %d px)" % (os.path.basename(self.src_path), self.base_img.width, self.base_img.height))
+        si, pi = self.order[self.cur_page]
+        src = self.sources[si]
+        name = os.path.basename(src["path"])
+        if src["page_count"] > 1:
+            name += " (%d/%dページ)" % (pi + 1, src["page_count"])
+        self.v_status.set("%s  (%d × %d px)" % (name, self.base_img.width, self.base_img.height))
 
     def change_page(self, d):
         if self.base_img is not None and 0 <= self.cur_page + d < self.page_count:
@@ -1089,13 +1391,17 @@ class App:
             return 8.0
         return min(8.0, math.sqrt(MAX_DISPLAY_PIXELS / (self.base_img.width * self.base_img.height)))
 
-    def fit(self):
-        if self.base_img is None:
-            return
+    def fit_zoom(self):
+        """いまの画面の大きさで、全体表示にしたときの倍率"""
         self.root.update_idletasks()
         cw, ch = max(100, self.canvas.winfo_width()), max(100, self.canvas.winfo_height())
         x0, y0, x1, y1 = self.content_rect()
-        self.set_zoom(min(cw / (x1 - x0), ch / (y1 - y0)) * 0.95)
+        return min(cw / (x1 - x0), ch / (y1 - y0)) * 0.95
+
+    def fit(self):
+        if self.base_img is None:
+            return
+        self.set_zoom(self.fit_zoom())
 
     # ---- 用紙 -----------------------------------------------------------
     def paper_layout(self, bw, bh):
@@ -1944,7 +2250,7 @@ class App:
 
     # ---- 保存・読込 -----------------------------------------------------
     def save(self):
-        if self.src_path is None:
+        if not self.sources:
             messagebox.showinfo(APP_NAME, "先に図面を開いてください。")
             return False
         if not self.annot_path:
@@ -1952,7 +2258,7 @@ class App:
         return self.write_annot(self.annot_path)
 
     def save_as(self):
-        if self.src_path is None:
+        if not self.sources:
             return False
         init = os.path.splitext(os.path.basename(self.src_path))[0] + ".annot"
         path = filedialog.asksaveasfilename(title="編集ファイルを保存", defaultextension=".annot", initialfile=init,
@@ -1962,13 +2268,19 @@ class App:
             return False
         return self.write_annot(path)
 
-    def write_annot(self, path):
-        try:
-            rel = os.path.relpath(self.src_path, os.path.dirname(os.path.abspath(path)))
-        except ValueError:
-            rel = None
-        data = {"version": 2,
-                "source": {"path": os.path.abspath(self.src_path), "rel": rel, "type": self.src_type},
+    def build_annot_data(self, path):
+        used, order_out, natural = annot_layout(self.sources, self.order)
+        base = os.path.dirname(os.path.abspath(path))
+        srcs = []
+        for i in used:
+            sp = self.sources[i]["path"]
+            try:
+                rel = os.path.relpath(sp, base)
+            except ValueError:
+                rel = None
+            srcs.append({"path": os.path.abspath(sp), "rel": rel, "type": self.sources[i]["type"]})
+        data = {"version": 2 if natural else 3,
+                "source": srcs[0],
                 "pdf_dpi": PDF_DPI,
                 "current_page": self.cur_page,
                 "common": self.common,
@@ -1976,6 +2288,13 @@ class App:
                 "paper": {"size": self.v_paper.get(), "orient": self.v_orient.get(),
                           "margin": self.v_margin.get(), "dpi": self.v_dpi.get()},
                 "pages": {str(k): v for k, v in self.pages.items()}}
+        if not natural:  # 図面が複数、または並びが変わっているとき(旧版は読めない)
+            data["sources"] = srcs
+            data["page_order"] = order_out
+        return data
+
+    def write_annot(self, path):
+        data = self.build_annot_data(path)
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=1)
@@ -1987,35 +2306,61 @@ class App:
         self.v_status.set("保存しました: %s" % path)
         return True
 
-    def open_annot(self):
-        if not self.confirm_discard():
-            return
-        path = filedialog.askopenfilename(title="編集ファイルを選択", filetypes=[("図面注記ファイル", "*.annot"), ("すべて", "*.*")])
-        if path:
-            self.load_annot(path)
+    def resolve_sources(self, annot_path, infos, hints):
+        """編集ファイルが使う図面の場所を決める。編集ファイルからの相対 → 絶対パス → 一緒に選ばれたファイル(名前が同じもの)
+        の順に探し、なければ選んでもらう。取り消されたら None。"""
+        base = os.path.dirname(os.path.abspath(annot_path))
+        pool = [h for h in hints if is_drawing_path(h)]
+        found, wants = [], []
+        for si in infos:
+            si = si if isinstance(si, dict) else {}
+            cands = []
+            if si.get("rel"):
+                cands.append(os.path.normpath(os.path.join(base, si["rel"])))
+            if si.get("path"):
+                cands.append(si["path"])
+            wants.append(os.path.basename(si.get("rel") or si.get("path") or ""))
+            found.append(next((c for c in cands if os.path.isfile(c)), None))
 
-    def load_annot(self, path):
+        def assign():
+            for i, w in enumerate(wants):
+                if found[i] is None:
+                    j = next((k for k, p in enumerate(pool) if os.path.basename(p) == w), None)
+                    if j is not None:
+                        found[i] = pool.pop(j)
+            un = [i for i, f in enumerate(found) if f is None]
+            if un and len(pool) == len(un):  # 名前が違っても、数がぴったりなら順に使う
+                for i in un:
+                    found[i] = pool.pop(0)
+
+        assign()
+        while any(f is None for f in found):
+            missing = [w for w, f in zip(wants, found) if f is None and w]
+            messagebox.showwarning(APP_NAME, "元の図面が見つかりません。\n\n%s\n\n図面ファイルを選んでください(複数選べます)。" % (
+                "\n".join("・" + w for w in missing) if missing else "(名前の記録なし)"))
+            picked = filedialog.askopenfilenames(title="元の図面を選択", filetypes=FILETYPES_DRAW)
+            if not picked:
+                return None
+            pool.extend(p for p in picked if is_drawing_path(p))
+            assign()
+        return found
+
+    def load_annot(self, path, hints=()):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
             messagebox.showerror(APP_NAME, "読み込めませんでした。\n%s" % e)
             return
-        src = data.get("source", {})
-        cands = []
-        if src.get("rel"):
-            cands.append(os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), src["rel"])))
-        if src.get("path"):
-            cands.append(src["path"])
-        found = next((c for c in cands if os.path.exists(c)), None)
-        if not found:
-            messagebox.showwarning(APP_NAME, "元の図面が見つかりません。図面ファイルを選んでください。")
-            found = filedialog.askopenfilename(title="元の図面を選択",
-                                               filetypes=[("図面(PDF・画像)", "*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif *.webp")])
-            if not found:
-                return
-        if not self.load_source(found):
+        # 図面は、version 2 なら source の1つだけ、version 3 なら sources の全部
+        infos = data["sources"] if isinstance(data.get("sources"), list) and data["sources"] else [data.get("source", {})]
+        found = self.resolve_sources(path, infos, list(hints))
+        if found is None:
             return
+        srcs = self.read_sources(found)
+        if srcs is None:
+            return
+        self.use_sources(srcs, valid_page_order(data.get("page_order"), [x["page_count"] for x in srcs]))
         self.pages, self.common = migrate_loaded(data)
         self.next_num = int(data.get("next_num", 1))
         self.v_next.set(str(self.next_num))
@@ -2034,6 +2379,11 @@ class App:
         self.load_common_to_ui()
         self.go_page(int(data.get("current_page", 0)))
         self.set_dirty(False)
+        for info, f in zip(infos, found):
+            want = os.path.basename((info.get("rel") or info.get("path") or "") if isinstance(info, dict) else "")
+            if want and want != os.path.basename(f):
+                self.v_status.set("※編集ファイルの元の図面は「%s」ですが、「%s」を使っています" % (want, os.path.basename(f)))
+                break
 
     # ---- PNG書き出し ----------------------------------------------------
     def export_png(self):
@@ -2073,10 +2423,9 @@ class App:
             self.root.destroy()
 
     def run(self):
-        if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
-            p = sys.argv[1]
-            self.root.after(200, lambda: self.load_annot(p) if p.lower().endswith(".annot") else (
-                self.load_source(p) and (self.auto_defaults(), self.go_page(0))))
+        paths = [a for a in sys.argv[1:] if os.path.exists(a)]
+        if paths:  # ファイルを重ねて起動(ドラッグ&ドロップ)したとき
+            self.root.after(200, lambda: self.open_paths(paths))
         self.root.mainloop()
 
 

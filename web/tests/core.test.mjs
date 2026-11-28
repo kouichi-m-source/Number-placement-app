@@ -139,3 +139,31 @@ test("pngWithDpi inserts valid pHYs", () => {
   const dv = new DataView(out.buffer);
   assert.equal(dv.getUint32(41), Math.round(300 / 0.0254));
 });
+
+// ---- 複数の図面・ページの入れ替え(.annot version 3) ---
+const baseArgs = { curPage: 0, common: C.defaultCommon(), nextNum: 1, paper: { size: "A4", orient: "自動", margin: "10", dpi: "200" }, pages: {} };
+
+test("図面が1つで並びもそのままなら version 2 で保存する(旧版と互換)", () => {
+  const d = C.buildAnnot({ ...baseArgs, sources: [{ name: "a.pdf", type: "pdf", pageCount: 2 }], order: [[0, 0], [0, 1]] });
+  assert.equal(d.version, 2);
+  assert.equal(d.sources, undefined);
+  assert.equal(d.page_order, undefined);
+  assert.deepEqual(d.source, { path: "a.pdf", rel: "a.pdf", type: "pdf" });
+});
+
+test("図面が複数、または並びが変わったら version 3 で保存する", () => {
+  const two = C.buildAnnot({ ...baseArgs, sources: [{ name: "a.png", type: "image", pageCount: 1 }, { name: "b.pdf", type: "pdf", pageCount: 2 }], order: [[0, 0], [1, 0], [1, 1]] });
+  assert.equal(two.version, 3);
+  assert.deepEqual(two.sources.map((s) => s.path), ["a.png", "b.pdf"]);
+  assert.deepEqual(two.page_order, [[0, 0], [1, 0], [1, 1]]);
+  assert.equal(two.source.path, "a.png");
+  const swapped = C.buildAnnot({ ...baseArgs, sources: [{ name: "b.pdf", type: "pdf", pageCount: 2 }], order: [[0, 1], [0, 0]] });
+  assert.equal(swapped.version, 3);
+});
+
+test("page_order の検査: 範囲外や形の違うものは捨て、使えなければ null", () => {
+  assert.equal(C.validPageOrder(undefined, [1]), null);
+  assert.equal(C.validPageOrder([], [1]), null);
+  assert.deepEqual(C.validPageOrder([[0, 0], [1, 1], [1, 5], [2, 0], "x", [0]], [1, 2]), [[0, 0], [1, 1]]);
+  assert.deepEqual(C.validPageOrder([["0", "0"]], [1]), [[0, 0]]);
+});

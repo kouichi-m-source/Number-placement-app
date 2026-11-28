@@ -163,6 +163,29 @@ export async function renderPdfPage(doc, pageIdx) {
   return { W, H, raster, k };
 }
 
+/** ページ入れ替え画面用の小さな画像(幅 maxW px 前後) */
+export async function renderPdfThumb(doc, pageIdx, maxW = 96) {
+  const page = await doc.getPage(pageIdx + 1);
+  const vp1 = page.getViewport({ scale: 1 });
+  const vp = page.getViewport({ scale: maxW / vp1.width });
+  const c = newCanvas(vp.width, vp.height);
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#FFFFFF";
+  ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, canvas: c, viewport: vp }).promise;
+  page.cleanup();
+  return c;
+}
+
+export function imageThumb(raster, maxW = 96) {
+  const k = maxW / raster.width;
+  const c = newCanvas(raster.width * k, raster.height * k);
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(raster, 0, 0, c.width, c.height);
+  return c;
+}
+
 // ------------------------------------------------------------- 画像 ---
 async function decodeImage(file) {
   try { return await createImageBitmap(file, { imageOrientation: "none" }); } catch (e) { /* 次へ */ }

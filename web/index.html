@@ -17,9 +17,11 @@
 <body>
 <div id="app">
   <div id="bar1" class="bar">
-    <button class="btn" id="btnOpen">開く ▾</button>
+    <button class="btn" id="btnOpen" title="図面(PDF・画像)も編集ファイル(.annot)も開けます">開く</button>
+    <button class="btn" id="btnAdd" title="開いている作業の最後に、図面(PDF・画像)を追加します">追加</button>
     <button class="btn" id="btnSave">保存</button>
     <button class="btn" id="btnExport">書き出し ▾</button>
+    <button class="btn" id="btnEdit">編集 ▾</button>
     <span class="sep"></span>
     <button class="btn sq" id="btnUndo" title="元に戻す">↶</button>
     <button class="btn sq" id="btnRedo" title="やり直し">↷</button>
@@ -49,13 +51,14 @@
     <span id="pending"></span>
     <span class="grow"></span>
     <label>次の番号 <input id="vNext" type="number" inputmode="numeric" min="0" max="99999" step="1"></label>
+    <button class="swbtn on" id="btnTbl" role="switch" aria-checked="true" title="注記一覧の表を表示・非表示にします"><span>表の表示</span><span class="sw"><i></i></span><span class="swtxt">ON</span></button>
   </div>
   <div id="main">
     <div id="stage">
       <canvas id="view"></canvas>
       <div id="empty">
-        <div class="big">図面(PDF・画像)を開いてください</div>
-        <div><button class="btn primary" id="btnOpen2">図面を開く</button> <button class="btn" id="btnRestore2" hidden>前回の作業を復元</button></div>
+        <div class="big">図面(PDF・画像)か、編集ファイル(.annot)を開いてください</div>
+        <div><button class="btn primary" id="btnOpen2">開く</button> <button class="btn" id="btnRestore2" hidden>前回の作業を復元</button></div>
         <div class="small">空いている所をダブルタップで番号を置きます。長押し(右クリック)でメニューが出ます。</div>
       </div>
     </div>
@@ -80,8 +83,7 @@
 
 <div id="menu" hidden></div>
 <div id="modalBack" hidden><div id="modal"></div></div>
-<input type="file" id="fileDrawing" hidden accept="application/pdf,image/*,.pdf,.png,.jpg,.jpeg,.bmp,.gif,.webp,.tif,.tiff">
-<input type="file" id="fileAnnot" hidden multiple>
+<input type="file" id="fileOpen" hidden multiple>
 <script type="module" src="app.js"></script>
 </body>
 </html>
