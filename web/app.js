@@ -487,7 +487,7 @@ function layoutForSave() {
 function annotData() {
   const { sources, order } = layoutForSave();
   return C.buildAnnot({
-    sources: sources.map((s) => ({ name: s.name, type: s.type, pageCount: s.pageCount })), order,
+    sources: sources.map((s) => ({ name: s.name, type: s.type })), order,
     curPage: S.curPage, common: S.common, nextNum: S.nextNum, paper: S.paper, pages: S.pages,
   });
 }
@@ -509,8 +509,9 @@ async function openAnnotFiles(files) {
   try {
     data = JSON.parse(await annotFile.text());
     if (!data || typeof data !== "object" || !data.pages) throw new Error("編集ファイルの形式ではありません");
+    if (!C.isCurrentFormat(data)) throw new Error("古い形式(version 2 以前)の編集ファイルは読み込めません");
   } catch (e) { await alertBox("読み込めませんでした。\n" + e.message); return; }
-  const infos = annotSources(data);
+  const infos = data.sources;
   const pool = files.filter((f) => f !== annotFile && isDrawingFile(f));
   const picked = await resolveSources(infos, pool);
   if (!picked) return;
@@ -518,7 +519,8 @@ async function openAnnotFiles(files) {
   let srcs;
   try { srcs = await readSources(picked); } catch (e) { await alertBox("図面を開けませんでした。\n" + (e && e.message ? e.message : e)); return; }
   const order = C.validPageOrder(data.page_order, srcs.map((s) => s.pageCount));
-  useSources(srcs, order ? order.map(([s, p]) => ({ s, p })) : null);
+  if (!order) { closeSources(srcs); await alertBox("読み込めませんでした。\nページの並び(page_order)が正しくありません。"); return; }
+  useSources(srcs, order.map(([s, p]) => ({ s, p })));
   applyAnnot(data, annotFile.name);
   await goPage(parseInt(data.current_page, 10) || 0);
   setDirty(false);
@@ -527,8 +529,6 @@ async function openAnnotFiles(files) {
   if (renamed.length) status(`※編集ファイルの元の図面は「${renamed[0][0]}」ですが、「${renamed[0][1]}」を使っています`);
 }
 
-/** 編集ファイルが使う図面の一覧(version 2 は1つだけ、version 3 は sources) */
-const annotSources = (data) => (Array.isArray(data.sources) && data.sources.length ? data.sources : [data.source || {}]);
 const wantName = (si) => IO.baseName((si && (si.rel || si.path)) || "");
 
 /** 編集ファイルが使う図面を、選ばれたファイル(pool)から名前で探す。足りなければ選んでもらう。取り消されたら null */
@@ -624,8 +624,9 @@ async function restoreBackup() {
   if (!b) { await alertBox("復元できる作業が見つかりません。"); return; }
   if (!(await confirmDiscard())) return;
   const data = b.meta.annot;
+  if (!C.isCurrentFormat(data)) { await alertBox("前回の作業は古い形式で一時保存されているため、復元できません。"); return; }
   const pool = b.blobs.map((x) => new File([x.blob], x.name, { type: x.blob.type }));
-  const picked = annotSources(data).map((si) => {
+  const picked = data.sources.map((si) => {
     const j = pool.findIndex((f) => f.name === wantName(si));
     return j >= 0 ? pool.splice(j, 1)[0] : null;
   });
@@ -634,7 +635,8 @@ async function restoreBackup() {
   let srcs;
   try { srcs = await readSources(picked); } catch (e) { await alertBox("図面を開けませんでした。\n" + e.message); return; }
   const order = C.validPageOrder(data.page_order, srcs.map((s) => s.pageCount));
-  useSources(srcs, order ? order.map(([s, p]) => ({ s, p })) : null);
+  if (!order) { closeSources(srcs); await alertBox("一時保存したページの並びが正しくないため、復元できません。"); return; }
+  useSources(srcs, order.map(([s, p]) => ({ s, p })));
   applyAnnot(data, b.meta.annotName);
   await goPage(parseInt(data.current_page, 10) || 0);
   setDirty(true);

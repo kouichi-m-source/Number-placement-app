@@ -143,22 +143,23 @@ test("pngWithDpi inserts valid pHYs", () => {
 // ---- 複数の図面・ページの入れ替え(.annot version 3) ---
 const baseArgs = { curPage: 0, common: C.defaultCommon(), nextNum: 1, paper: { size: "A4", orient: "自動", margin: "10", dpi: "200" }, pages: {} };
 
-test("図面が1つで並びもそのままなら version 2 で保存する(旧版と互換)", () => {
-  const d = C.buildAnnot({ ...baseArgs, sources: [{ name: "a.pdf", type: "pdf", pageCount: 2 }], order: [[0, 0], [0, 1]] });
-  assert.equal(d.version, 2);
-  assert.equal(d.sources, undefined);
-  assert.equal(d.page_order, undefined);
-  assert.deepEqual(d.source, { path: "a.pdf", rel: "a.pdf", type: "pdf" });
+test("保存は常に version 3(図面が1つでも同じ形)", () => {
+  const one = C.buildAnnot({ ...baseArgs, sources: [{ name: "a.pdf", type: "pdf" }], order: [[0, 0], [0, 1]] });
+  assert.equal(one.version, 3);
+  assert.deepEqual(one.sources, [{ path: "a.pdf", rel: "a.pdf", type: "pdf" }]);
+  assert.deepEqual(one.page_order, [[0, 0], [0, 1]]);
+  assert.equal(one.source, undefined);
+  const two = C.buildAnnot({ ...baseArgs, sources: [{ name: "a.png", type: "image" }, { name: "b.pdf", type: "pdf" }], order: [[0, 0], [1, 1], [1, 0]] });
+  assert.deepEqual(two.sources.map((x) => x.path), ["a.png", "b.pdf"]);
+  assert.deepEqual(two.page_order, [[0, 0], [1, 1], [1, 0]]);
 });
 
-test("図面が複数、または並びが変わったら version 3 で保存する", () => {
-  const two = C.buildAnnot({ ...baseArgs, sources: [{ name: "a.png", type: "image", pageCount: 1 }, { name: "b.pdf", type: "pdf", pageCount: 2 }], order: [[0, 0], [1, 0], [1, 1]] });
-  assert.equal(two.version, 3);
-  assert.deepEqual(two.sources.map((s) => s.path), ["a.png", "b.pdf"]);
-  assert.deepEqual(two.page_order, [[0, 0], [1, 0], [1, 1]]);
-  assert.equal(two.source.path, "a.png");
-  const swapped = C.buildAnnot({ ...baseArgs, sources: [{ name: "b.pdf", type: "pdf", pageCount: 2 }], order: [[0, 1], [0, 0]] });
-  assert.equal(swapped.version, 3);
+test("読み込める形は version 3 だけ(version 2 は読み込まない)", () => {
+  assert.equal(C.isCurrentFormat(C.buildAnnot({ ...baseArgs, sources: [{ name: "a.png", type: "image" }], order: [[0, 0]] })), true);
+  assert.equal(C.isCurrentFormat({ version: 2, source: { path: "a.png" }, pages: {} }), false);
+  assert.equal(C.isCurrentFormat({ version: 3, sources: [], page_order: [] }), false);
+  assert.equal(C.isCurrentFormat({ version: 3, sources: [{}] }), false);
+  assert.equal(C.isCurrentFormat(null), false);
 });
 
 test("page_order の検査: 範囲外や形の違うものは捨て、使えなければ null", () => {

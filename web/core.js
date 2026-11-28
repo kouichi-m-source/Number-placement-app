@@ -1,5 +1,5 @@
 // 番号配置アプリ(Web版) 注記データ・幾何・番号解析のコア
-// Win版(zumen_annot.pyw)と同じ計算式・同じ編集ファイル形式(.annot / version 2)で動かすための移植。
+// Win版(zumen_annot.pyw)と同じ計算式・同じ編集ファイル形式(.annot / version 3)で動かすための移植。
 // DOM に依存しないので、Node でもテストできる。
 export const APP_NAME = "図面注記";
 export const PDF_DPI = 150;
@@ -555,10 +555,9 @@ export function rasterScale(w, h, maxPixels = MAX_PIXELS, maxSide = MAX_SIDE) {
 }
 
 // ------------------------------------------------------- 編集ファイル(.annot) ---
-/** 並びが「1つの図面を、頭から全ページそのまま」なら true(この場合だけ version 2 で保存し、古いアプリとも互換にする) */
-export function isNaturalLayout(sources, order) {
-  return sources.length === 1 && order.length === sources[0].pageCount
-    && order.every(([s, p], i) => s === 0 && p === i);
+/** 読み込める編集ファイルの形(version 3)か。古い形式(version 2 など)は読み込まない */
+export function isCurrentFormat(d) {
+  return !!d && d.version === 3 && Array.isArray(d.sources) && d.sources.length > 0 && Array.isArray(d.page_order);
 }
 
 /** 読み込んだ page_order を検査する。使えなければ null(呼び出し側で「頭から全ページ」にする)。pageCounts は図面ごとのページ数 */
@@ -573,15 +572,15 @@ export function validPageOrder(raw, pageCounts) {
   return out.length ? out : null;
 }
 
-/** 保存用のデータ。図面が1つで並びもそのままなら version 2(Win版・旧版と同じ)、それ以外は version 3。
- *  sources: [{name, type, pageCount}]、order: [[図面の番号, その図面のページ(0始まり)], ...]。Web版は図面のパスを知らないので、ファイル名だけを入れる。 */
+/** 保存用のデータ(version 3)。sources: [{name, type}]、order: [[図面の番号, その図面のページ(0始まり)], ...]。
+ *  Web版は図面のパスを知らないので、ファイル名だけを入れる。 */
 export function buildAnnot({ sources, order, curPage, common, nextNum, paper, pages }) {
   const outPages = {};
   for (const k of Object.keys(pages).sort((a, b) => a - b)) outPages[String(k)] = pages[k];
-  const src = (x) => ({ path: x.name, rel: x.name, type: x.type });
-  const data = {
-    version: isNaturalLayout(sources, order) ? 2 : 3,
-    source: src(sources[0]),
+  return {
+    version: 3,
+    sources: sources.map((x) => ({ path: x.name, rel: x.name, type: x.type })),
+    page_order: order.map(([s, p]) => [s, p]),
     pdf_dpi: PDF_DPI,
     current_page: curPage,
     common,
@@ -589,11 +588,6 @@ export function buildAnnot({ sources, order, curPage, common, nextNum, paper, pa
     paper: { size: paper.size, orient: paper.orient, margin: String(paper.margin), dpi: String(paper.dpi) },
     pages: outPages,
   };
-  if (data.version === 3) {
-    data.sources = sources.map(src);
-    data.page_order = order.map(([s, p]) => [s, p]);
-  }
-  return data;
 }
 
 // ---------------------------------------------------------------- PNG ---

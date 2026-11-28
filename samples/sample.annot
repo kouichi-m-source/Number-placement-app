@@ -1,10 +1,18 @@
 {
- "version": 2,
- "source": {
-  "path": "sample.png",
-  "rel": "sample.png",
-  "type": "image"
- },
+ "version": 3,
+ "sources": [
+  {
+   "path": "sample.png",
+   "rel": "sample.png",
+   "type": "image"
+  }
+ ],
+ "page_order": [
+  [
+   0,
+   0
+  ]
+ ],
  "pdf_dpi": 150,
  "current_page": 0,
  "common": {

@@ -194,6 +194,12 @@ def is_drawing_path(p):
     return str(p).lower().endswith(DRAW_EXTS)
 
 
+def is_current_format(d):
+    """読み込める編集ファイルの形(version 3)か。古い形式(version 2 など)は読み込まない。"""
+    return (isinstance(d, dict) and d.get("version") == 3 and isinstance(d.get("sources"), list)
+            and len(d["sources"]) > 0 and isinstance(d.get("page_order"), list))
+
+
 def valid_page_order(raw, page_counts):
     """.annot の page_order を検査する。範囲外や形の違うものは捨て、使えなければ None(呼び出し側で「頭から全ページ」にする)。
     page_counts は図面ごとのページ数。"""
@@ -214,17 +220,14 @@ def valid_page_order(raw, page_counts):
 
 def annot_layout(sources, order):
     """保存する図面の一覧と並びを返す。いま使っている図面だけを、使い始めた順に並べ直す。
-    戻り値: (使う図面の番号の並び, 新しい並び [[図面の番号, ページ], ...], 「1つの図面を頭から全ページそのまま」か)。
-    そのままなら version 2(旧版と同じ形)、それ以外は version 3 で保存する。"""
+    戻り値: (使う図面の番号の並び, 新しい並び [[図面の番号, ページ], ...])。"""
     remap, used, out = {}, [], []
     for si, pi in order:
         if si not in remap:
             remap[si] = len(used)
             used.append(si)
         out.append([remap[si], pi])
-    natural = (len(used) == 1 and len(out) == sources[used[0]]["page_count"]
-               and all(a == 0 and b == i for i, (a, b) in enumerate(out)))
-    return used, out, natural
+    return used, out
 
 
 def color_name(hx):
@@ -2269,7 +2272,7 @@ class App:
         return self.write_annot(path)
 
     def build_annot_data(self, path):
-        used, order_out, natural = annot_layout(self.sources, self.order)
+        used, order_out = annot_layout(self.sources, self.order)
         base = os.path.dirname(os.path.abspath(path))
         srcs = []
         for i in used:
@@ -2279,8 +2282,9 @@ class App:
             except ValueError:
                 rel = None
             srcs.append({"path": os.path.abspath(sp), "rel": rel, "type": self.sources[i]["type"]})
-        data = {"version": 2 if natural else 3,
-                "source": srcs[0],
+        data = {"version": 3,
+                "sources": srcs,
+                "page_order": order_out,
                 "pdf_dpi": PDF_DPI,
                 "current_page": self.cur_page,
                 "common": self.common,
@@ -2288,9 +2292,6 @@ class App:
                 "paper": {"size": self.v_paper.get(), "orient": self.v_orient.get(),
                           "margin": self.v_margin.get(), "dpi": self.v_dpi.get()},
                 "pages": {str(k): v for k, v in self.pages.items()}}
-        if not natural:  # 図面が複数、または並びが変わっているとき(旧版は読めない)
-            data["sources"] = srcs
-            data["page_order"] = order_out
         return data
 
     def write_annot(self, path):
@@ -2352,15 +2353,22 @@ class App:
         except Exception as e:
             messagebox.showerror(APP_NAME, "読み込めませんでした。\n%s" % e)
             return
-        # 図面は、version 2 なら source の1つだけ、version 3 なら sources の全部
-        infos = data["sources"] if isinstance(data.get("sources"), list) and data["sources"] else [data.get("source", {})]
+        if not is_current_format(data):
+            messagebox.showerror(APP_NAME, "読み込めませんでした。\n古い形式(version 2 以前)の編集ファイルは読み込めません。")
+            return
+        infos = data["sources"]
         found = self.resolve_sources(path, infos, list(hints))
         if found is None:
             return
         srcs = self.read_sources(found)
         if srcs is None:
             return
-        self.use_sources(srcs, valid_page_order(data.get("page_order"), [x["page_count"] for x in srcs]))
+        order = valid_page_order(data.get("page_order"), [x["page_count"] for x in srcs])
+        if order is None:
+            self.close_sources(srcs)
+            messagebox.showerror(APP_NAME, "読み込めませんでした。\nページの並び(page_order)が正しくありません。")
+            return
+        self.use_sources(srcs, order)
         self.pages, self.common = migrate_loaded(data)
         self.next_num = int(data.get("next_num", 1))
         self.v_next.set(str(self.next_num))
